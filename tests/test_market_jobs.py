@@ -107,3 +107,21 @@ def test_run_job_api_legacy_mode_returns_market_mode(monkeypatch, tmp_path: Path
     assert response.json()["market"] == "cn"
     assert response.json()["report_type"] == "after_close"
     assert response.json()["mode"] == "cn.after_close"
+
+
+def test_scheduler_status_api_requires_root_and_returns_status(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("STOCK_REPORT_DIR", str(tmp_path / "reports"))
+    status_path = tmp_path / "reports" / "scheduler_status.json"
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    status_path.write_text('{"status":"running","current_time":"09:40"}', encoding="utf-8")
+
+    app = create_app(report_dir=tmp_path / "reports", data_dir=tmp_path / "data", output_dir=tmp_path / "output", frontend_dist_dir=tmp_path / "dist")
+    client = TestClient(app)
+    login = client.post("/api/auth/login", json={"username": "root", "password": "admin@root"})
+    token = login.json()["access_token"]
+
+    response = client.get("/api/scheduler/status", headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "running"
+    assert response.json()["current_time"] == "09:40"

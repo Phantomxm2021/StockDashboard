@@ -148,6 +148,36 @@ docker compose down -v
 
 调度器优先使用 AKShare 交易日历判断交易日；如果交易日历获取失败，会退回到跳过周末。
 
+### 自动任务排查
+
+确认 scheduler 容器是否运行：
+
+```bash
+docker compose ps
+docker compose logs -f scheduler
+```
+
+查看 scheduler 记录的心跳、今日任务、最近执行结果：
+
+```bash
+docker compose exec web cat /app/reports/scheduler_status.json
+```
+
+也可以登录后端后调用：
+
+```text
+GET /api/scheduler/status
+```
+
+手动模拟某个定时点，只执行一次命中的任务：
+
+```bash
+docker compose exec scheduler python -m stock_dashboard.scheduler --once --at 09:40 --force-trading-day
+docker compose exec scheduler python -m stock_dashboard.scheduler --once --at 15:05 --force-trading-day
+```
+
+如果 `due_results` 为空，说明当前模拟时间没有命中任何任务；如果状态是 `skipped_non_trading_day`，说明交易日历判定当天不是交易日；如果状态是 `failed`，看 `output_tail` 就能看到任务脚本失败原因。
+
 ## 目录和数据
 
 Docker Compose 使用命名卷保存运行数据：

@@ -14,6 +14,7 @@ const PAGE_SIZE = 50;
 export function ReportView({ token, market, reportType, title }: ReportViewProps) {
   const [pool, setPool] = useState("core");
   const [page, setPage] = useState(1);
+  const [refreshKey, setRefreshKey] = useState(0);
   const [report, setReport] = useState<ReportPayload | null>(null);
   const [tooltip, setTooltip] = useState<{ text: string; x: number; y: number } | null>(null);
   const [error, setError] = useState("");
@@ -44,7 +45,7 @@ export function ReportView({ token, market, reportType, title }: ReportViewProps
     return () => {
       cancelled = true;
     };
-  }, [token, market, reportType, pool, page]);
+  }, [token, market, reportType, pool, page, refreshKey]);
 
   return (
     <section className="content-stack">
@@ -53,7 +54,13 @@ export function ReportView({ token, market, reportType, title }: ReportViewProps
           <span className="eyebrow">{title}</span>
           <h2>观察池</h2>
         </div>
-        <button className="secondary-button" onClick={() => setPage(1)}>
+        <button
+          className="secondary-button"
+          onClick={() => {
+            setPage(1);
+            setRefreshKey((value) => value + 1);
+          }}
+        >
           <RefreshCw size={16} />
           刷新
         </button>

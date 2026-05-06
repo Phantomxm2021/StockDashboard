@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from datetime import date
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from stock_dashboard.scheduler import TradingDayChecker
+from stock_dashboard.scheduler import TradingDayChecker, read_scheduler_status, run_scheduler_tick
 
 
 def test_scheduler_jobs_include_all_markets():
@@ -44,3 +47,43 @@ def test_trading_day_checker_falls_back_to_weekdays_when_calendar_fails() -> Non
 
     assert checker.is_trading_day(date(2026, 5, 4)) is True
     assert checker.is_trading_day(date(2026, 5, 9)) is False
+
+
+def test_scheduler_tick_runs_due_task_and_writes_status(monkeypatch, tmp_path: Path) -> None:
+    calls = []
+
+    def fake_run_job(market: str, report_type: str, base_dir: Path):
+        calls.append((market, report_type))
+        from stock_dashboard.jobs import JobResult
+
+        return JobResult(market=market, report_type=report_type, returncode=0, output="ok")
+
+    monkeypatch.setenv("STOCK_REPORT_DIR", str(tmp_path / "reports"))
+    monkeypatch.setattr("stock_dashboard.scheduler.run_job", fake_run_job)
+
+    results = run_scheduler_tick(
+        datetime(2026, 5, 5, 9, 40, tzinfo=ZoneInfo("Asia/Shanghai")),
+        TradingDayChecker(calendar_loader=lambda: pd.DataFrame({"trade_date": ["2026-05-05"]})),
+        set(),
+    )
+
+    assert calls == [("cn", "morning")]
+    assert results[0]["status"] == "succeeded"
+    status = read_scheduler_status()
+    assert status["current_time"] == "09:40"
+    assert status["last_runs"][0]["market"] == "cn"
+    assert status["last_runs"][0]["report_type"] == "morning"
+
+
+def test_scheduler_tick_records_non_trading_day_skip(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("STOCK_REPORT_DIR", str(tmp_path / "reports"))
+
+    results = run_scheduler_tick(
+        datetime(2026, 5, 5, 9, 40, tzinfo=ZoneInfo("Asia/Shanghai")),
+        TradingDayChecker(calendar_loader=lambda: pd.DataFrame({"trade_date": ["2026-05-04"]})),
+        set(),
+    )
+
+    assert results[0]["status"] == "skipped_non_trading_day"
+    status = read_scheduler_status()
+    assert status["trading_day"] is False

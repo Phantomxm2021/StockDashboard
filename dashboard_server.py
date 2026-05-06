@@ -14,6 +14,7 @@ from stock_dashboard.config import BASE_DIR, AppConfig, build_config
 from stock_dashboard.jobs import JobManager
 from stock_dashboard.markets import get_market_definition, list_market_payloads, validate_market_report
 from stock_dashboard.reports import ReportQuery, build_report_payload, read_status
+from stock_dashboard.scheduler import read_scheduler_status
 from stock_dashboard.users import User, UserStore
 
 
@@ -180,6 +181,10 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
         return read_status(config.report_dir, market)
+
+    @app.get("/api/scheduler/status")
+    def scheduler_status_api(current_user: RootUser) -> dict[str, object]:
+        return read_scheduler_status()
 
     @app.post("/api/jobs/run", status_code=status.HTTP_202_ACCEPTED)
     def run_job_api(payload: RunJobRequest, current_user: RootUser) -> dict[str, object]:
