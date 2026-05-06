@@ -159,3 +159,29 @@ def test_sector_strength_uses_industry_fund_flow_fallback_without_constituents(m
 
     assert enrichment.loc[enrichment["code"] == "000001", "主线板块"].iloc[0] == "科技"
     assert enrichment.loc[enrichment["code"] == "000001", "板块强度分"].iloc[0] > 0
+
+
+def test_sector_strength_limits_each_sector_to_top_100_constituents(monkeypatch, tmp_path) -> None:
+    codes = [f"{index:06d}" for index in range(1, 151)]
+    quote_df = pd.DataFrame([{"code": code} for code in codes])
+
+    monkeypatch.setattr(
+        a_stock.ak,
+        "stock_sector_fund_flow_rank",
+        lambda indicator="今日", sector_type="行业资金流": pd.DataFrame(
+            [{"行业": "科技", "净额": "20亿"}]
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        a_stock.ak,
+        "stock_board_industry_cons_em",
+        lambda symbol: pd.DataFrame([{"代码": code} for code in codes]),
+        raising=False,
+    )
+
+    enrichment = a_stock.build_mainline_enrichment(quote_df, cache_dir=tmp_path)
+
+    assert int((enrichment["板块强度分"] > 0).sum()) == 100
+    assert enrichment.loc[enrichment["code"] == "000100", "板块强度分"].iloc[0] > 0
+    assert enrichment.loc[enrichment["code"] == "000101", "板块强度分"].iloc[0] == 0

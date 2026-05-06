@@ -318,6 +318,7 @@ def get_gain_rank_from_quotes(quote_df: pd.DataFrame, top_n: int) -> pd.DataFram
 # ============================================================
 
 DEFAULT_ENRICHMENT_CACHE_DIR = Path("reports/cn/enrichment_cache")
+SECTOR_CONSTITUENT_LIMIT = 100
 
 
 def _resolve_enrichment_cache_dir(cache_dir: str | os.PathLike[str] | None) -> Path:
@@ -487,7 +488,7 @@ def _apply_sector_strength(base: pd.DataFrame, cache_dir: str | os.PathLike[str]
             if code_col is None:
                 continue
             score = max(25 - index * 2.5, 5)
-            mapping = cons_df[[code_col]].copy()
+            mapping = cons_df.head(SECTOR_CONSTITUENT_LIMIT)[[code_col]].copy()
             mapping["code"] = mapping[code_col].apply(normalize_code)
             mapping["主线板块"] = sector_name
             mapping["板块强度分"] = score
