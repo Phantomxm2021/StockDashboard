@@ -573,6 +573,9 @@ def _apply_individual_fund_flow(base: pd.DataFrame, cache_dir: str | os.PathLike
 
 
 def _apply_hot_rank(base: pd.DataFrame, cache_dir: str | os.PathLike[str] | None = None) -> pd.DataFrame:
+    base = base.copy()
+    if "新闻催化分" not in base.columns:
+        base["新闻催化分"] = 0.0
     columns = ["code", "新闻催化分"]
     providers = [
         ("stock_hot_rank_em", None),

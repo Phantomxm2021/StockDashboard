@@ -146,6 +146,21 @@ def test_hot_rank_uses_latest_provider_when_primary_fails(monkeypatch, tmp_path)
     assert enrichment.loc[enrichment["code"] == "000002", "新闻催化分"].iloc[0] == 0
 
 
+def test_hot_rank_can_be_called_directly_without_existing_score_column(monkeypatch, tmp_path) -> None:
+    base = pd.DataFrame([{"code": "000001", "名称": "热度股份"}])
+
+    monkeypatch.setattr(
+        a_stock.ak,
+        "stock_hot_rank_em",
+        lambda: pd.DataFrame([{"代码": "000001", "当前排名": 1}]),
+        raising=False,
+    )
+
+    enrichment = a_stock._apply_hot_rank(base, cache_dir=tmp_path)
+
+    assert enrichment.loc[0, "新闻催化分"] == 10
+
+
 def test_sector_strength_uses_industry_fund_flow_fallback_without_constituents(monkeypatch, tmp_path) -> None:
     quote_df = pd.DataFrame(
         [
