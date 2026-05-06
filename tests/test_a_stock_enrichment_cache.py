@@ -106,6 +106,21 @@ def test_individual_fund_flow_parses_chinese_money_units(monkeypatch, tmp_path) 
     assert enrichment.loc[enrichment["code"] == "000002", "资金流向分"].iloc[0] == 4
 
 
+def test_individual_fund_flow_can_be_called_directly_without_existing_score_column(monkeypatch, tmp_path) -> None:
+    base = pd.DataFrame([{"code": "000001", "名称": "资金股份"}])
+
+    monkeypatch.setattr(
+        a_stock.ak,
+        "stock_fund_flow_individual",
+        lambda symbol="即时": pd.DataFrame([{"股票代码": "000001", "净额": "1亿"}]),
+        raising=False,
+    )
+
+    enrichment = a_stock._apply_individual_fund_flow(base, cache_dir=tmp_path)
+
+    assert enrichment.loc[0, "资金流向分"] == 16
+
+
 def test_hot_rank_uses_latest_provider_when_primary_fails(monkeypatch, tmp_path) -> None:
     quote_df = pd.DataFrame([{"code": "000001"}, {"code": "000002"}])
 

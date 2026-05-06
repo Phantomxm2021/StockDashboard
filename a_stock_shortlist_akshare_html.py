@@ -525,6 +525,9 @@ def _apply_sector_strength(base: pd.DataFrame, cache_dir: str | os.PathLike[str]
 
 
 def _apply_individual_fund_flow(base: pd.DataFrame, cache_dir: str | os.PathLike[str] | None = None) -> pd.DataFrame:
+    base = base.copy()
+    if "资金流向分" not in base.columns:
+        base["资金流向分"] = 0.0
     columns = ["code", "资金流向分"]
     providers = [
         ("stock_individual_fund_flow_rank", {"indicator": "今日"}),
