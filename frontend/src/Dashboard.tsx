@@ -44,11 +44,15 @@ export function Dashboard({ token, user, onLogout }: DashboardProps) {
     () => markets.find((market) => market.id === activeMarketId) ?? markets[0] ?? null,
     [activeMarketId, markets]
   );
-  const selectedReport = activeMarket?.reports.find((report) => report.id === view);
-  const allowedView = user.is_root || selectedReport ? view : activeMarket?.default_report_type ?? "";
+  const visibleReports = user.is_root ? activeMarket?.reports ?? [] : [];
+  const reportView = user.is_root ? view : activeMarket?.default_report_type ?? "";
+  const selectedReport = activeMarket?.reports.find((report) => report.id === reportView);
+  const allowedView = user.is_root || selectedReport ? reportView : activeMarket?.default_report_type ?? "";
   const activeTitle = isAdminView(allowedView)
     ? titleForAdminView(allowedView)
-    : activeMarket?.reports.find((report) => report.id === allowedView)?.title ?? "";
+    : user.is_root
+      ? activeMarket?.reports.find((report) => report.id === allowedView)?.title ?? ""
+      : "观察池";
 
   return (
     <main className="app-shell">
@@ -84,7 +88,12 @@ export function Dashboard({ token, user, onLogout }: DashboardProps) {
           </select>
         </div>
         <nav className="nav-list">
-          {activeMarket?.reports.map((report) => (
+          {!user.is_root ? (
+            <button className="active" onClick={() => activeMarket && setView(activeMarket.default_report_type)}>
+              观察池
+            </button>
+          ) : null}
+          {visibleReports.map((report) => (
             <button key={report.id} className={allowedView === report.id ? "active" : ""} onClick={() => setView(report.id)}>
               {report.title}
             </button>
@@ -123,8 +132,8 @@ export function Dashboard({ token, user, onLogout }: DashboardProps) {
         </header>
 
         {marketError ? <div className="empty-state">{marketError}</div> : null}
-        {activeMarket && !isAdminView(allowedView) ? (
-          <ReportView token={token} market={activeMarket.id} reportType={allowedView} title={activeTitle} />
+        {activeMarket && !isAdminView(allowedView) && selectedReport ? (
+          <ReportView token={token} market={activeMarket.id} reportType={selectedReport.id} title={activeTitle} />
         ) : null}
         {user.is_root && activeMarket && allowedView === "status" ? (
           <AdminViews token={token} market={activeMarket.id} reports={activeMarket.reports} view="status" />
