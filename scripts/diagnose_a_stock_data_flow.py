@@ -28,12 +28,14 @@ def main() -> None:
         return
 
     run_step("2. 成交额榜", lambda: diagnose_amount_rank(quotes))
-    sector = run_step("3. 板块强度", lambda: diagnose_sector_strength(quotes))
-    fund = run_step("4. 个股资金流", lambda: diagnose_individual_fund_flow(quotes))
-    hot = run_step("5. 热度/新闻催化", lambda: diagnose_hot_rank(quotes))
+    sector_fund = run_step("3. 板块资金源", diagnose_sector_fund_flow)
+    sector = run_step("4. 板块强度", lambda: diagnose_sector_strength(quotes))
+    fund = run_step("5. 个股资金流", lambda: diagnose_individual_fund_flow(quotes))
+    hot = run_step("6. 热度/新闻催化", lambda: diagnose_hot_rank(quotes))
 
     print("\n== 汇总 ==")
     print_summary("实时行情", quotes, value_column=None)
+    print_summary("板块资金源", sector_fund, value_column="板块资金净流入")
     print_summary("板块强度", sector, value_column="板块强度分")
     print_summary("个股资金流", fund, value_column="资金流向分")
     print_summary("热度/新闻催化", hot, value_column="新闻催化分")
@@ -83,6 +85,22 @@ def diagnose_amount_rank(quotes: pd.DataFrame) -> pd.DataFrame:
     print("成交额榜 top_n: 100")
     print_frame(amount_rank, ["code", "代码", "名称", "最新价", "涨跌幅", "成交额", "成交额亿", "数据源"], rows=20)
     return amount_rank
+
+
+def diagnose_sector_fund_flow() -> pd.DataFrame:
+    fetched = a_stock._fetch_sector_fund_flow()
+    if fetched is None:
+        print("板块资金源: 全部 provider 失败")
+        return pd.DataFrame()
+
+    provider_name, sector_df, name_col, flow_col, change_col = fetched
+    print(f"板块资金 provider: {provider_name}")
+    print(f"字段识别: name_col={name_col!r}, flow_col={flow_col!r}, change_col={change_col!r}")
+    print("原始字段:", list(sector_df.columns))
+    ranked = a_stock._rank_sector_fund_flow(sector_df, flow_col=flow_col, change_col=change_col)
+    display_cols = [col for col in [name_col, flow_col, change_col, "板块资金净流入", "板块涨跌幅"] if col in ranked.columns]
+    print_frame(ranked, display_cols, rows=20)
+    return ranked
 
 
 def diagnose_sector_strength(quotes: pd.DataFrame) -> pd.DataFrame:

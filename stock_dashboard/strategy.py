@@ -105,12 +105,14 @@ def build_mainline_candidates(
     ).clip(lower=0, upper=20)
     candidates_df["位置风险分"] = candidates_df.apply(_position_risk_score, axis=1)
     candidates_df["新闻催化分"] = candidates_df["新闻催化分"].fillna(0).clip(lower=0, upper=10)
+    candidates_df["主线地位分"] = _mainline_leadership_score(candidates_df, market)
     candidates_df["主线强势分"] = (
         candidates_df["个股强度分"]
         + candidates_df["板块强度分"]
         + candidates_df["资金流向分"]
         + candidates_df["位置风险分"]
         + candidates_df["新闻催化分"]
+        + candidates_df["主线地位分"]
     ).round(2)
     candidates_df["买入观察等级"] = candidates_df.apply(
         lambda row: _watch_level(row, config),
@@ -230,7 +232,47 @@ def _individual_strength(row: pd.Series, amount_codes: set[str], gain_codes: set
             score += 4
         elif _is_star_market(code):
             score += 3
+    elif market.state == "shrinking" and _is_chinext(code):
+        score -= 2
     return round(min(score, 25), 2)
+
+
+def _mainline_leadership_score(df: pd.DataFrame, market: MarketContext) -> pd.Series:
+    scores = pd.Series(0.0, index=df.index, dtype="float64")
+    if df.empty or "主线板块" not in df.columns:
+        return scores
+
+    working = df.copy()
+    working["__sector"] = working["主线板块"].fillna("").astype(str).str.strip()
+    working = working[working["__sector"] != ""].copy()
+    if working.empty:
+        return scores
+
+    working["__amount_rank"] = working.groupby("__sector")["成交额亿"].rank(
+        ascending=False,
+        method="first",
+    )
+    working["__change_rank"] = working.groupby("__sector")["涨跌幅"].rank(
+        ascending=False,
+        method="first",
+    )
+
+    leadership = (
+        working["__amount_rank"].map({1.0: 8.0, 2.0: 4.0, 3.0: 2.0}).fillna(0.0)
+        + working["__change_rank"].map({1.0: 7.0, 2.0: 3.0, 3.0: 1.0}).fillna(0.0)
+    )
+
+    if market.state == "expanding":
+        leadership += working["code"].apply(
+            lambda code: 2.0 if (_is_chinext(code) or _is_star_market(code)) else 0.0
+        )
+    elif market.state == "shrinking":
+        leadership -= working["code"].apply(
+            lambda code: 3.0 if _is_chinext(code) else 0.0
+        )
+
+    scores.loc[working.index] = leadership.clip(lower=0, upper=15).round(2)
+    return scores
 
 
 def _position_risk_score(row: pd.Series) -> float:
@@ -258,21 +300,32 @@ def _watch_level(row: pd.Series, config: MainlineStrategyConfig) -> str:
     sector_score = float(row.get("板块强度分", 0) or 0)
     fund_score = float(row.get("资金流向分", 0) or 0)
     catalyst_score = float(row.get("新闻催化分", 0) or 0)
+    leadership_score = float(row.get("主线地位分", 0) or 0)
+    code = row.get("code", "")
+    market_label = str(row.get("市场环境", ""))
     if position_risk_score < 10:
         return "C_暂缓跟踪"
-    has_mainline_confirmation = sector_score >= 12 and fund_score >= 6
-    has_catalyst_confirmation = sector_score >= 16 and catalyst_score >= 6
+    leader_threshold = 8
+    if market_label == "放量" and (_is_chinext(code) or _is_star_market(code)):
+        leader_threshold = 7
+    elif market_label == "缩量" and _is_chinext(code):
+        leader_threshold = 10
+    has_leadership_confirmation = leadership_score >= leader_threshold
+    has_mainline_confirmation = sector_score >= 12 and fund_score >= 6 and has_leadership_confirmation
+    has_catalyst_confirmation = sector_score >= 16 and catalyst_score >= 6 and has_leadership_confirmation
     has_strong_fund_confirmation = fund_score >= 8 and individual_score >= 18
     enrichment_missing = sector_score == 0 and fund_score == 0
-    if str(row.get("市场环境", "")) == "放量" and _is_star_market(row.get("code", "")) and fund_score < 6:
+    if market_label == "放量" and _is_star_market(code) and fund_score < 6:
         return "B_继续观察" if score >= config.b_pool_min_score else "C_暂缓跟踪"
-    if has_strong_fund_confirmation:
-        return "A_核心关注"
+    if market_label == "缩量" and _is_chinext(code) and has_mainline_confirmation:
+        return "B_继续观察"
     required_score = config.a_pool_min_score
-    if str(row.get("市场环境", "")) == "放量" and _is_chinext(row.get("code", "")):
+    if market_label == "放量" and _is_chinext(code):
         required_score -= 5
     if score >= required_score and (has_mainline_confirmation or has_catalyst_confirmation):
         return "A_核心关注"
+    if has_strong_fund_confirmation:
+        return "B_继续观察"
     if enrichment_missing and individual_score >= 18 and score >= 40:
         return "B_继续观察"
     if score >= config.b_pool_min_score:

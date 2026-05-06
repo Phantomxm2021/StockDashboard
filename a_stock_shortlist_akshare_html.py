@@ -317,6 +317,7 @@ def get_gain_rank_from_quotes(quote_df: pd.DataFrame, top_n: int) -> pd.DataFram
 DEFAULT_ENRICHMENT_CACHE_DIR = Path("reports/cn/enrichment_cache")
 SECTOR_CONSTITUENT_LIMIT = 100
 MIN_FRESH_SECTOR_MAPPING_ROWS = 100
+_SINA_CLASSIFY_CACHE: dict[str, dict[str, pd.DataFrame]] = {}
 
 
 def _resolve_enrichment_cache_dir(cache_dir: str | os.PathLike[str] | None) -> Path:
@@ -441,8 +442,7 @@ def build_market_context(quote_df: pd.DataFrame) -> MarketContext:
     return MarketContext(state=state, amount_yi=round(amount_yi, 2))
 
 
-def _apply_sector_strength(base: pd.DataFrame, cache_dir: str | os.PathLike[str] | None = None) -> pd.DataFrame:
-    columns = ["code", "主线板块", "板块强度分"]
+def _fetch_sector_fund_flow() -> tuple[str, pd.DataFrame, str | None, str | None, str | None] | None:
     fetched = _try_ak_providers(
         [
             ("stock_fund_flow_industry", {"symbol": "即时"}),
@@ -451,19 +451,20 @@ def _apply_sector_strength(base: pd.DataFrame, cache_dir: str | os.PathLike[str]
         ],
         "行业板块资金流",
     )
-
     if fetched is None:
-        cached = _read_enrichment_cache(cache_dir, "sector_strength", columns)
-        return _merge_enrichment_values(base, cached, ["主线板块", "板块强度分"])
-
+        return None
     provider_name, sector_df = fetched
     name_col = find_col(sector_df, ["名称", "行业", "板块"])
     flow_col = find_col(sector_df, ["主力净流入", "净流入", "资金净流入", "净额"])
     change_col = find_col(sector_df, ["涨跌幅", "涨幅"])
-    if name_col is None:
-        cached = _read_enrichment_cache(cache_dir, "sector_strength", columns)
-        return _merge_enrichment_values(base, cached, ["主线板块", "板块强度分"])
+    return provider_name, sector_df.copy(), name_col, flow_col, change_col
 
+
+def _rank_sector_fund_flow(
+    sector_df: pd.DataFrame,
+    flow_col: str | None,
+    change_col: str | None,
+) -> pd.DataFrame:
     sector = sector_df.copy()
     if flow_col is not None:
         sector["板块资金净流入"] = safe_money_numeric(sector[flow_col]).fillna(0)
@@ -471,6 +472,23 @@ def _apply_sector_strength(base: pd.DataFrame, cache_dir: str | os.PathLike[str]
     elif change_col is not None:
         sector["板块涨跌幅"] = safe_numeric(sector[change_col]).fillna(0)
         sector = sector.sort_values("板块涨跌幅", ascending=False)
+    return sector
+
+
+def _apply_sector_strength(base: pd.DataFrame, cache_dir: str | os.PathLike[str] | None = None) -> pd.DataFrame:
+    columns = ["code", "主线板块", "板块强度分"]
+    fetched = _fetch_sector_fund_flow()
+
+    if fetched is None:
+        cached = _read_enrichment_cache(cache_dir, "sector_strength", columns)
+        return _merge_enrichment_values(base, cached, ["主线板块", "板块强度分"])
+
+    provider_name, sector_df, name_col, flow_col, change_col = fetched
+    if name_col is None:
+        cached = _read_enrichment_cache(cache_dir, "sector_strength", columns)
+        return _merge_enrichment_values(base, cached, ["主线板块", "板块强度分"])
+
+    sector = _rank_sector_fund_flow(sector_df, flow_col=flow_col, change_col=change_col)
     top_sector_rows = sector.head(10).copy()
     top_sectors = [str(value) for value in top_sector_rows[name_col].tolist() if str(value).strip()]
     sector_labels = _extract_sector_labels(top_sector_rows, name_col)
@@ -567,17 +585,18 @@ def _fetch_sina_sector_label_map() -> dict[str, str]:
 
 
 def _lookup_sector_label(sector_name: str, label_map: dict[str, str]) -> str | None:
-    normalized = sector_name.strip()
+    normalized = _normalize_sector_name(sector_name)
     if not normalized:
         return None
-    if normalized in label_map:
-        return label_map[normalized]
+    normalized_map = {_normalize_sector_name(name): label for name, label in label_map.items()}
+    if normalized in normalized_map:
+        return normalized_map[normalized]
     compact = normalized.replace(" ", "")
-    for name, label in label_map.items():
+    for name, label in normalized_map.items():
         name_compact = name.replace(" ", "")
         if compact == name_compact:
             return label
-    for name, label in label_map.items():
+    for name, label in normalized_map.items():
         name_compact = name.replace(" ", "")
         if compact in name_compact or name_compact in compact:
             return label
@@ -594,6 +613,77 @@ def _fetch_sector_constituents(sector_name: str, sector_label: str | None = None
         if cons_df is not None and not cons_df.empty:
             print(f"[ENRICH] 新浪板块成分 provider=stock_sector_detail sector={sector_name} label={sector_label} rows={len(cons_df)}")
             return cons_df
+    cons_df = _fetch_classified_constituents(sector_name)
+    if cons_df is not None and not cons_df.empty:
+        print(f"[ENRICH] 分类映射成分 provider=stock_classify_sina sector={sector_name} rows={len(cons_df)}")
+        return cons_df
+    return None
+
+
+def _normalize_sector_name(name: str) -> str:
+    text = str(name or "").strip()
+    replacements = {
+        "Ⅱ": "",
+        "Ⅲ": "",
+        "I": "",
+        "IT": "信息技术",
+        "服务": "",
+        "设备": "",
+        "板块": "",
+        "行业": "",
+        "概念": "",
+        " ": "",
+    }
+    for source, target in replacements.items():
+        text = text.replace(source, target)
+    return text
+
+
+def _load_sina_classify_groups(symbol: str) -> dict[str, pd.DataFrame]:
+    cached = _SINA_CLASSIFY_CACHE.get(symbol)
+    if cached is not None:
+        return cached
+    if not hasattr(ak, "stock_classify_sina"):
+        _SINA_CLASSIFY_CACHE[symbol] = {}
+        return {}
+    try:
+        classify_df = ak.stock_classify_sina(symbol=symbol)
+    except Exception as e:
+        print(f"[WARN] 分类映射获取失败：{symbol} {repr(e)}")
+        _SINA_CLASSIFY_CACHE[symbol] = {}
+        return {}
+
+    class_col = find_col(classify_df, ["class", "分类", "板块"])
+    code_col = find_col(classify_df, ["代码", "股票代码", "symbol", "code"])
+    if class_col is None or code_col is None:
+        print(f"[WARN] 分类映射字段无法识别：{symbol} columns={list(classify_df.columns)}")
+        _SINA_CLASSIFY_CACHE[symbol] = {}
+        return {}
+
+    groups: dict[str, pd.DataFrame] = {}
+    for class_name, group in classify_df.groupby(class_col):
+        normalized = _normalize_sector_name(class_name)
+        if not normalized:
+            continue
+        groups[normalized] = group[[code_col]].copy()
+    print(f"[ENRICH] 分类映射 provider=stock_classify_sina symbol={symbol} groups={len(groups)}")
+    _SINA_CLASSIFY_CACHE[symbol] = groups
+    return groups
+
+
+def _fetch_classified_constituents(sector_name: str) -> pd.DataFrame | None:
+    normalized = _normalize_sector_name(sector_name)
+    if not normalized:
+        return None
+    for symbol in ["申万行业", "热门概念"]:
+        groups = _load_sina_classify_groups(symbol)
+        if not groups:
+            continue
+        if normalized in groups:
+            return groups[normalized]
+        for group_name, group in groups.items():
+            if normalized in group_name or group_name in normalized:
+                return group
     return None
 
 
@@ -694,23 +784,74 @@ def classify_morning_buy_level(row: pd.Series) -> str:
     change_pct = row.get("涨跌幅", 0)
     amount_yi = row.get("成交额亿", 0)
     score = row.get("早盘确认分", 0)
+    opening_strength = str(row.get("开盘强弱", ""))
+    support = str(row.get("承接确认", ""))
+    pattern = str(row.get("早盘形态", ""))
 
-    if change_pct > 7:
+    if opening_strength == "高开过热" or pattern == "冲高过热" or change_pct > 6:
         return "C_不追_高开过多"
 
-    if change_pct < -3:
+    if opening_strength == "明显走弱" or pattern == "明显走弱" or change_pct < -3:
         return "C_放弃_明显走弱"
 
-    if amount_yi < 0.5:
+    if support == "承接弱" or amount_yi < 0.5:
         return "C_放弃_成交不足"
 
-    if 0 <= change_pct <= 5 and score >= 8:
+    if opening_strength == "温和走强" and support == "承接强" and pattern == "延续强势" and score >= 12:
         return "A_早盘重点确认"
 
-    if -1 <= change_pct <= 6 and score >= 5:
+    if (
+        pattern in {"弱转强观察", "低开承接"}
+        and support in {"承接强", "承接一般"}
+        and score >= 8
+    ):
+        return "B_继续观察"
+
+    if -1 <= change_pct <= 5 and score >= 6 and support in {"承接强", "承接一般"}:
         return "B_继续观察"
 
     return "C_暂不考虑"
+
+
+def _morning_opening_strength(change_pct: float) -> str:
+    if change_pct >= 5.5:
+        return "高开过热"
+    if change_pct >= 1.5:
+        return "温和走强"
+    if change_pct >= -0.5:
+        return "平开观察"
+    if change_pct >= -2.0:
+        return "低开承接"
+    return "明显走弱"
+
+
+def _morning_support_confirmation(amount_yi: float, turnover: float | None, has_turnover: bool) -> str:
+    turnover_value = float(turnover or 0) if pd.notna(turnover) else 0.0
+    if has_turnover:
+        if amount_yi >= 3 and turnover_value >= 5:
+            return "承接强"
+        if amount_yi >= 1 and turnover_value >= 2:
+            return "承接一般"
+        return "承接弱"
+    if amount_yi >= 5:
+        return "承接强"
+    if amount_yi >= 1.5:
+        return "承接一般"
+    return "承接弱"
+
+
+def _morning_pattern(change_pct: float, opening_strength: str, support_confirmation: str) -> str:
+    if opening_strength == "高开过热":
+        return "冲高过热"
+    if opening_strength == "明显走弱":
+        return "明显走弱"
+    if opening_strength == "温和走强" and support_confirmation == "承接强":
+        return "延续强势"
+    if opening_strength == "平开观察" and support_confirmation in {"承接强", "承接一般"} and change_pct >= 0:
+        return "弱转强观察"
+    if opening_strength == "低开承接" and support_confirmation == "承接强":
+        return "低开承接"
+    return "震荡观察"
 
 
 # ============================================================
@@ -739,6 +880,28 @@ def build_after_close_candidates(
     print(f"[筛选] candidates：{len(candidates_df)}")
     print(f"[筛选] excluded：{len(excluded_df)}")
     return candidates_df, excluded_df
+
+
+def restrict_quotes_to_mainline_universe(
+    quote_df: pd.DataFrame,
+    enrichment_df: pd.DataFrame | None,
+) -> pd.DataFrame:
+    if enrichment_df is None or enrichment_df.empty or "code" not in enrichment_df.columns:
+        return quote_df.iloc[0:0].copy()
+
+    board_universe = enrichment_df.copy()
+    board_universe["code"] = board_universe["code"].apply(normalize_code)
+    board_universe = board_universe[
+        board_universe["板块强度分"].fillna(0) > 0
+    ][["code"]].drop_duplicates()
+
+    if board_universe.empty:
+        return quote_df.iloc[0:0].copy()
+
+    filtered = quote_df.copy()
+    filtered["code"] = filtered["code"].apply(normalize_code)
+    filtered = filtered[filtered["code"].isin(set(board_universe["code"]))].copy()
+    return filtered
 
 
 def split_candidate_pools(candidates_df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
@@ -836,10 +999,43 @@ def morning_confirm(
     else:
         turnover_score = 0
 
+    df["开盘强弱"] = df["涨跌幅"].apply(lambda value: _morning_opening_strength(float(value or 0)))
+    df["承接确认"] = df.apply(
+        lambda row: _morning_support_confirmation(
+            float(row.get("成交额亿", 0) or 0),
+            row.get("换手率"),
+            has_real_turnover,
+        ),
+        axis=1,
+    )
+    df["早盘形态"] = df.apply(
+        lambda row: _morning_pattern(
+            float(row.get("涨跌幅", 0) or 0),
+            str(row.get("开盘强弱", "")),
+            str(row.get("承接确认", "")),
+        ),
+        axis=1,
+    )
+
+    opening_bonus = df["开盘强弱"].map({
+        "温和走强": 3.0,
+        "平开观察": 1.0,
+        "低开承接": 0.5,
+        "高开过热": -3.0,
+        "明显走弱": -4.0,
+    }).fillna(0.0)
+    support_bonus = df["承接确认"].map({
+        "承接强": 4.0,
+        "承接一般": 1.5,
+        "承接弱": -3.0,
+    }).fillna(0.0)
+
     df["早盘确认分"] = (
         df["涨跌幅"] * 2.0 +
         turnover_score +
-        df["成交额亿"].clip(upper=30)
+        df["成交额亿"].clip(upper=30) +
+        opening_bonus +
+        support_bonus
     )
 
     df["早盘买入等级"] = df.apply(classify_morning_buy_level, axis=1)
@@ -858,6 +1054,7 @@ def morning_confirm(
     keep_cols = [
         "code", "代码", "名称", "最新价", "涨跌幅", "成交额亿",
         "换手率", "有换手率数据",
+        "开盘强弱", "承接确认", "早盘形态",
         "早盘确认分", "早盘买入等级", "早盘动作建议",
         "数据源",
     ]
@@ -1320,28 +1517,31 @@ def run_after_close(output_dir: str = "output") -> pd.DataFrame:
     quote_df = get_realtime_quotes()
     print_df_info("实时行情", quote_df)
 
-    print("\n[2/5] 生成成交额榜...")
-    amount_rank_df = get_amount_rank_from_quotes(quote_df, config.amount_top_n)
+    market_context = build_market_context(quote_df)
+    print(f"\n[市场环境] {market_context.label}，全市场成交额约 {market_context.amount_yi:.0f} 亿")
+
+    print("\n[2/5] 获取主线增强数据：板块强度 + 资金流向 + 新闻热度...")
+    enrichment_df = build_mainline_enrichment(quote_df)
+    print_df_info("主线增强数据", enrichment_df)
+
+    mainline_quote_df = restrict_quotes_to_mainline_universe(quote_df, enrichment_df)
+    print(f"[主线宇宙] 全市场股票数={len(quote_df)}，命中强板块成分股={len(mainline_quote_df)}")
+
+    print("\n[3/5] 生成主线宇宙成交额榜...")
+    amount_rank_df = get_amount_rank_from_quotes(mainline_quote_df, config.amount_top_n)
     print_df_info("成交额榜", amount_rank_df)
 
-    print("\n[3/5] 生成涨幅榜 + 获取龙虎榜补充信号...")
-    gain_rank_df = get_gain_rank_from_quotes(quote_df, config.gain_top_n)
+    print("\n[4/5] 生成主线宇宙涨幅榜 + 获取龙虎榜补充信号...")
+    gain_rank_df = get_gain_rank_from_quotes(mainline_quote_df, config.gain_top_n)
     print_df_info("涨幅榜", gain_rank_df)
 
     lhb_df = get_lhb_today()
     print_df_info("龙虎榜", lhb_df)
 
-    market_context = build_market_context(quote_df)
-    print(f"\n[市场环境] {market_context.label}，全市场成交额约 {market_context.amount_yi:.0f} 亿")
-
-    print("\n[4/5] 获取主线增强数据：板块强度 + 资金流向 + 新闻热度...")
-    enrichment_df = build_mainline_enrichment(quote_df)
-    print_df_info("主线增强数据", enrichment_df)
-
     print("\n[5/5] 生成主线强势观察池并自动打标...")
     candidates_df, excluded_df = build_after_close_candidates(
         config=config,
-        quote_df=quote_df,
+        quote_df=mainline_quote_df,
         amount_rank_df=amount_rank_df,
         gain_rank_df=gain_rank_df,
         lhb_df=lhb_df,

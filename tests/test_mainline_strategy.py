@@ -75,6 +75,53 @@ def test_mainline_strategy_prefers_sector_fund_and_catalyst_over_lhb_only() -> N
     assert "候选类型" not in candidates_df.columns
 
 
+def test_mainline_strategy_requires_leadership_for_core() -> None:
+    quote_df = pd.DataFrame(
+        [
+            {
+                "code": "000008",
+                "代码": "000008",
+                "名称": "板块龙头",
+                "最新价": 24.3,
+                "涨跌幅": 5.8,
+                "成交额": 2_600_000_000,
+                "换手率": 12.0,
+                "有换手率数据": True,
+                "数据源": "test",
+            },
+            {
+                "code": "000009",
+                "代码": "000009",
+                "名称": "板块跟风",
+                "最新价": 19.8,
+                "涨跌幅": 2.2,
+                "成交额": 900_000_000,
+                "换手率": 7.0,
+                "有换手率数据": True,
+                "数据源": "test",
+            },
+        ]
+    )
+
+    candidates_df, _ = build_mainline_candidates(
+        config=MainlineStrategyConfig(),
+        quote_df=quote_df,
+        amount_rank_df=quote_df[["code"]],
+        gain_rank_df=quote_df[["code"]],
+        lhb_df=pd.DataFrame(),
+        enrichment_df=pd.DataFrame(
+            [
+                {"code": "000008", "主线板块": "算力", "板块强度分": 18, "资金流向分": 8, "新闻催化分": 8},
+                {"code": "000009", "主线板块": "算力", "板块强度分": 18, "资金流向分": 8, "新闻催化分": 8},
+            ]
+        ),
+    )
+
+    levels = dict(zip(candidates_df["代码"], candidates_df["买入观察等级"]))
+    assert levels["000008"] == "A_核心关注"
+    assert levels["000009"] == "B_继续观察"
+
+
 def test_mainline_strategy_penalizes_high_position_risk() -> None:
     quote_df = pd.DataFrame(
         [
@@ -131,14 +178,14 @@ def test_mainline_strategy_allows_sector_catalyst_core_when_fund_is_moderate() -
         gain_rank_df=quote_df[["code"]],
         lhb_df=pd.DataFrame(),
         enrichment_df=pd.DataFrame(
-            [{"code": "000004", "板块强度分": 18, "资金流向分": 5, "新闻催化分": 8}]
+            [{"code": "000004", "主线板块": "机器人", "板块强度分": 18, "资金流向分": 5, "新闻催化分": 8}]
         ),
     )
 
     assert candidates_df.iloc[0]["买入观察等级"] == "A_核心关注"
 
 
-def test_mainline_strategy_allows_fund_strength_with_strong_individual_signal() -> None:
+def test_mainline_strategy_keeps_fund_only_strength_in_watch_pool() -> None:
     quote_df = pd.DataFrame(
         [
             {
@@ -167,7 +214,7 @@ def test_mainline_strategy_allows_fund_strength_with_strong_individual_signal() 
     )
 
     assert candidates_df.iloc[0]["个股强度分"] >= 18
-    assert candidates_df.iloc[0]["买入观察等级"] == "A_核心关注"
+    assert candidates_df.iloc[0]["买入观察等级"] == "B_继续观察"
 
 
 def test_mainline_strategy_does_not_allow_weak_fund_path_into_core() -> None:
@@ -292,7 +339,7 @@ def test_mainline_strategy_boosts_chinext_when_market_is_expanding() -> None:
         gain_rank_df=quote_df[["code"]],
         lhb_df=pd.DataFrame(),
         enrichment_df=pd.DataFrame(
-            [{"code": "300001", "板块强度分": 12, "资金流向分": 6, "新闻催化分": 0}]
+            [{"code": "300001", "主线板块": "机器人", "板块强度分": 12, "资金流向分": 6, "新闻催化分": 0}]
         ),
         market_context=MarketContext(state="expanding", amount_yi=11000),
     )
@@ -300,6 +347,39 @@ def test_mainline_strategy_boosts_chinext_when_market_is_expanding() -> None:
     assert candidates_df.iloc[0]["市场环境"] == "放量"
     assert candidates_df.iloc[0]["个股强度分"] >= 22
     assert candidates_df.iloc[0]["买入观察等级"] == "A_核心关注"
+
+
+def test_mainline_strategy_deprioritizes_chinext_when_market_is_shrinking() -> None:
+    quote_df = pd.DataFrame(
+        [
+            {
+                "code": "300002",
+                "代码": "300002",
+                "名称": "缩量创业",
+                "最新价": 22.0,
+                "涨跌幅": 4.8,
+                "成交额": 1_400_000_000,
+                "换手率": 10.0,
+                "有换手率数据": True,
+                "数据源": "test",
+            }
+        ]
+    )
+
+    candidates_df, _ = build_mainline_candidates(
+        config=MainlineStrategyConfig(),
+        quote_df=quote_df,
+        amount_rank_df=quote_df[["code"]],
+        gain_rank_df=quote_df[["code"]],
+        lhb_df=pd.DataFrame(),
+        enrichment_df=pd.DataFrame(
+            [{"code": "300002", "主线板块": "机器人", "板块强度分": 18, "资金流向分": 8, "新闻催化分": 6}]
+        ),
+        market_context=MarketContext(state="shrinking", amount_yi=7600),
+    )
+
+    assert candidates_df.iloc[0]["市场环境"] == "缩量"
+    assert candidates_df.iloc[0]["买入观察等级"] == "B_继续观察"
 
 
 def test_star_market_requires_fund_confirmation_when_market_is_expanding() -> None:

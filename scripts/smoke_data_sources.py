@@ -29,7 +29,19 @@ def main() -> None:
         print("ERROR:", repr(exc))
         quotes = load_latest_quotes()
 
-    print("\n[2/3] 板块强度")
+    print("\n[2/4] 板块资金源")
+    fetched = a_stock._fetch_sector_fund_flow()
+    if fetched is None:
+        print("板块资金源: 全部 provider 失败")
+    else:
+        provider_name, sector_df, name_col, flow_col, change_col = fetched
+        print(f"板块资金 provider: {provider_name}")
+        print(f"字段识别: name_col={name_col!r}, flow_col={flow_col!r}, change_col={change_col!r}")
+        ranked_sector = a_stock._rank_sector_fund_flow(sector_df, flow_col=flow_col, change_col=change_col)
+        display_cols = [col for col in [name_col, flow_col, change_col, "板块资金净流入", "板块涨跌幅"] if col in ranked_sector.columns]
+        print_frame(ranked_sector, display_cols, rows=20)
+
+    print("\n[3/4] 板块强度")
     sector_enrichment = a_stock._apply_sector_strength(
         quotes[["code", "名称"]].copy(),
         cache_dir=ROOT_DIR / "reports" / "cn" / "enrichment_cache",
@@ -42,7 +54,7 @@ def main() -> None:
     print_frame(sector_rows, ["code", "名称", "主线板块", "板块强度分"], rows=30)
     print("板块强度非零数量:", int((sector_enrichment["板块强度分"] > 0).sum()))
 
-    print("\n[3/3] 个股资金流")
+    print("\n[4/4] 个股资金流")
     fund_enrichment = a_stock._apply_individual_fund_flow(
         quotes[["code", "名称"]].copy(),
         cache_dir=ROOT_DIR / "reports" / "cn" / "enrichment_cache",

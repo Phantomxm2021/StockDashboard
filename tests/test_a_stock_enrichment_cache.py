@@ -19,6 +19,7 @@ def disable_external_enrichment_providers(monkeypatch) -> None:
         "stock_board_industry_cons_em",
         "stock_board_concept_cons_em",
         "stock_sector_detail",
+        "stock_classify_sina",
         "stock_individual_fund_flow_rank",
         "stock_individual_fund_flow",
         "stock_main_fund_flow",
@@ -325,4 +326,41 @@ def test_sector_strength_uses_sina_sector_detail_without_eastmoney(monkeypatch, 
     enrichment = a_stock.build_mainline_enrichment(quote_df, cache_dir=tmp_path)
 
     assert enrichment.loc[0, "主线板块"] == "科技"
+    assert enrichment.loc[0, "板块强度分"] == 25
+
+
+def test_sector_strength_uses_classify_mapping_when_sector_detail_is_missing(monkeypatch, tmp_path) -> None:
+    quote_df = pd.DataFrame([{"code": "000001", "名称": "软件龙头"}])
+
+    monkeypatch.setattr(
+        a_stock.ak,
+        "stock_fund_flow_industry",
+        lambda symbol="即时": pd.DataFrame([{"行业": "软件开发", "净流入": "20亿"}]),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        a_stock.ak,
+        "stock_sector_spot",
+        lambda indicator="新浪行业": pd.DataFrame([{"label": "gn_soft", "板块": "软件开发"}]),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        a_stock.ak,
+        "stock_sector_detail",
+        lambda sector: pd.DataFrame(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        a_stock.ak,
+        "stock_classify_sina",
+        lambda symbol="申万行业": pd.DataFrame(
+            [{"symbol": "000001", "name": "软件龙头", "class": "软件开发"}]
+        ),
+        raising=False,
+    )
+    a_stock._SINA_CLASSIFY_CACHE.clear()
+
+    enrichment = a_stock.build_mainline_enrichment(quote_df, cache_dir=tmp_path)
+
+    assert enrichment.loc[0, "主线板块"] == "软件开发"
     assert enrichment.loc[0, "板块强度分"] == 25
