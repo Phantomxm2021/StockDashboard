@@ -1,0 +1,63 @@
+services:
+  web:
+    build:
+      context: .
+      args:
+        APT_MIRROR: ${APT_MIRROR:-https://mirrors.aliyun.com}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com}
+    ports:
+      - "${STOCK_WEB_PORT:-8001}:8001"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8001/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    environment:
+      STOCK_TZ: Asia/Shanghai
+      STOCK_REPORT_DIR: /app/reports
+      STOCK_OUTPUT_DIR: /app/output
+      STOCK_DATA_DIR: /app/data
+      STOCK_LOG_DIR: /app/logs
+      STOCK_WEB_PORT: 8001
+      STOCK_BOOTSTRAP_REPORTS: ${STOCK_BOOTSTRAP_REPORTS:-missing}
+      ALPACA_API_KEY_ID: ${ALPACA_API_KEY_ID:-}
+      ALPACA_API_SECRET_KEY: ${ALPACA_API_SECRET_KEY:-}
+      ALPACA_API_BASE_URL: ${ALPACA_API_BASE_URL:-https://data.alpaca.markets}
+    volumes:
+      - stock_dashboard_data:/app/data
+      - stock_dashboard_reports:/app/reports
+      - stock_dashboard_output:/app/output
+      - stock_dashboard_logs:/app/logs
+
+  scheduler:
+    build:
+      context: .
+      args:
+        APT_MIRROR: ${APT_MIRROR:-https://mirrors.aliyun.com}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com}
+    command: ["python", "-m", "stock_dashboard.scheduler"]
+    environment:
+      STOCK_TZ: Asia/Shanghai
+      STOCK_REPORT_DIR: /app/reports
+      STOCK_OUTPUT_DIR: /app/output
+      STOCK_DATA_DIR: /app/data
+      STOCK_LOG_DIR: /app/logs
+      ALPACA_API_KEY_ID: ${ALPACA_API_KEY_ID:-}
+      ALPACA_API_SECRET_KEY: ${ALPACA_API_SECRET_KEY:-}
+      ALPACA_API_BASE_URL: ${ALPACA_API_BASE_URL:-https://data.alpaca.markets}
+    volumes:
+      - stock_dashboard_data:/app/data
+      - stock_dashboard_reports:/app/reports
+      - stock_dashboard_output:/app/output
+      - stock_dashboard_logs:/app/logs
+    depends_on:
+      - web
+
+volumes:
+  stock_dashboard_data:
+  stock_dashboard_reports:
+  stock_dashboard_output:
+  stock_dashboard_logs:

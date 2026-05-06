@@ -1,0 +1,11 @@
+frontend/node_modules
+frontend/dist
+__pycache__
+*.pyc
+.pytest_cache
+.superpowers
+data
+logs
+output
+reports
+.DS_Store
