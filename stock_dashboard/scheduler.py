@@ -56,7 +56,7 @@ class ScheduledTask:
 
 
 STATIC_TASKS = [
-    ScheduledTask(market="cn", report_type="after_close", run_at="15:05"),
+    ScheduledTask(market="cn", report_type="after_close", run_at="21:55"),
     ScheduledTask(market="cn", report_type="morning", run_at="09:40"),
     ScheduledTask(market="hk", report_type="after_close", run_at="16:15"),
     ScheduledTask(market="hk", report_type="pre_market", run_at="09:22"),
