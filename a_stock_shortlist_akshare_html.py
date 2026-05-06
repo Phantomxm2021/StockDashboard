@@ -3,7 +3,7 @@ A股主线强势观察池生成器 - AKShare + HTML 看板完整版
 
 功能：
 1. 使用 AKShare 获取 A 股实时行情
-2. sina 优先，eastmoney 备用
+2. sina / tencent / 同花顺 / 雪球 / 百度多源降级，避免挂死单一数据源
 3. 结合成交额、涨幅、板块强度、资金流向、位置风险、新闻催化评分
 4. 收盘后 after_close：
    - 输出 candidates_YYYYMMDD.html
@@ -125,16 +125,12 @@ def build_realtime_providers() -> List[Tuple[str, Callable[[], pd.DataFrame]]]:
     """
     当前优先级：
     1. sina：当前环境更稳定
-    2. eastmoney：备用
-    3. tencent：如果当前 AKShare 版本存在，作为备用
+    2. tencent：如果当前 AKShare 版本存在，作为备用
     """
     providers: List[Tuple[str, Callable[[], pd.DataFrame]]] = []
 
     if hasattr(ak, "stock_zh_a_spot"):
         providers.append(("sina", getattr(ak, "stock_zh_a_spot")))
-
-    if hasattr(ak, "stock_zh_a_spot_em"):
-        providers.append(("eastmoney", getattr(ak, "stock_zh_a_spot_em")))
 
     if hasattr(ak, "stock_zh_a_spot_tx"):
         providers.append(("tencent", getattr(ak, "stock_zh_a_spot_tx")))
@@ -256,16 +252,17 @@ def get_lhb_today() -> pd.DataFrame:
     """
     获取龙虎榜每日详情。
     """
-    if not hasattr(ak, "stock_lhb_detail_daily_sina"):
-        print("[WARN] 当前 AKShare 版本没有 stock_lhb_detail_daily_sina")
+    today = datetime.now().strftime("%Y%m%d")
+    providers: list[tuple[str, dict | None]] = [
+        ("stock_lhb_detail_daily_sina", {"date": today}),
+        ("stock_lhb_ggtj_sina", {"symbol": "5"}),
+        ("stock_lhb_jgzz_sina", {"symbol": "5"}),
+    ]
+    fetched = _try_ak_providers(providers, "龙虎榜")
+    if fetched is None:
         return pd.DataFrame(columns=["code", "代码"])
 
-    try:
-        df = ak.stock_lhb_detail_daily_sina()
-    except Exception as e:
-        print(f"[WARN] 龙虎榜获取失败：{repr(e)}")
-        return pd.DataFrame(columns=["code", "代码"])
-
+    provider_name, df = fetched
     if df is None or len(df) == 0:
         return pd.DataFrame(columns=["code", "代码"])
 
@@ -273,7 +270,7 @@ def get_lhb_today() -> pd.DataFrame:
     code_col = find_col(df, ["代码", "股票代码", "symbol", "code"])
 
     if code_col is None:
-        print(f"[WARN] 龙虎榜未找到股票代码字段，当前字段：{df.columns.tolist()}")
+        print(f"[WARN] 龙虎榜 provider={provider_name} 未找到股票代码字段，当前字段：{df.columns.tolist()}")
         return pd.DataFrame(columns=["code", "代码"])
 
     df["code"] = df[code_col].apply(normalize_code)
@@ -319,6 +316,7 @@ def get_gain_rank_from_quotes(quote_df: pd.DataFrame, top_n: int) -> pd.DataFram
 
 DEFAULT_ENRICHMENT_CACHE_DIR = Path("reports/cn/enrichment_cache")
 SECTOR_CONSTITUENT_LIMIT = 100
+MIN_FRESH_SECTOR_MAPPING_ROWS = 100
 
 
 def _resolve_enrichment_cache_dir(cache_dir: str | os.PathLike[str] | None) -> Path:
@@ -447,7 +445,6 @@ def _apply_sector_strength(base: pd.DataFrame, cache_dir: str | os.PathLike[str]
     columns = ["code", "主线板块", "板块强度分"]
     fetched = _try_ak_providers(
         [
-            ("stock_sector_fund_flow_rank", {"indicator": "今日", "sector_type": "行业资金流"}),
             ("stock_fund_flow_industry", {"symbol": "即时"}),
             ("stock_fund_flow_concept", {"symbol": "即时"}),
             ("stock_sector_spot", {"indicator": "新浪行业"}),
@@ -474,17 +471,21 @@ def _apply_sector_strength(base: pd.DataFrame, cache_dir: str | os.PathLike[str]
     elif change_col is not None:
         sector["板块涨跌幅"] = safe_numeric(sector[change_col]).fillna(0)
         sector = sector.sort_values("板块涨跌幅", ascending=False)
-    top_sectors = [str(value) for value in sector[name_col].head(10).tolist() if str(value).strip()]
+    top_sector_rows = sector.head(10).copy()
+    top_sectors = [str(value) for value in top_sector_rows[name_col].tolist() if str(value).strip()]
+    sector_labels = _extract_sector_labels(top_sector_rows, name_col)
+    sina_label_map: dict[str, str] | None = None
 
     mappings: list[pd.DataFrame] = []
-    if hasattr(ak, "stock_board_industry_cons_em"):
-        for index, sector_name in enumerate(top_sectors):
-            try:
-                cons_df = ak.stock_board_industry_cons_em(symbol=sector_name)
-            except Exception as e:
-                print(f"[WARN] 行业成分获取失败：{sector_name} {repr(e)}")
-                continue
-            code_col = find_col(cons_df, ["代码", "股票代码", "code"])
+    for index, sector_name in enumerate(top_sectors):
+        sector_label = sector_labels.get(sector_name)
+        if sector_label is None:
+            if sina_label_map is None:
+                sina_label_map = _fetch_sina_sector_label_map()
+            sector_label = _lookup_sector_label(sector_name, sina_label_map)
+        cons_df = _fetch_sector_constituents(sector_name, sector_label=sector_label)
+        if cons_df is not None and not cons_df.empty:
+            code_col = find_col(cons_df, ["代码", "股票代码", "code", "symbol"])
             if code_col is None:
                 continue
             score = max(25 - index * 2.5, 5)
@@ -493,15 +494,6 @@ def _apply_sector_strength(base: pd.DataFrame, cache_dir: str | os.PathLike[str]
             mapping["主线板块"] = sector_name
             mapping["板块强度分"] = score
             mappings.append(mapping[["code", "主线板块", "板块强度分"]])
-
-    if not mappings and "名称" in base.columns:
-        for index, sector_name in enumerate(top_sectors):
-            matched = base[base["名称"].astype(str).str.contains(sector_name, na=False, regex=False)][["code"]].copy()
-            if matched.empty:
-                continue
-            matched["主线板块"] = sector_name
-            matched["板块强度分"] = max(18 - index * 2, 4)
-            mappings.append(matched[["code", "主线板块", "板块强度分"]])
 
     if not mappings:
         print(f"[WARN] 行业板块 provider={provider_name} 未匹配到候选股")
@@ -513,6 +505,19 @@ def _apply_sector_strength(base: pd.DataFrame, cache_dir: str | os.PathLike[str]
         .sort_values("板块强度分", ascending=False)
         .drop_duplicates("code", keep="first")
     )
+    if len(sector_map) < MIN_FRESH_SECTOR_MAPPING_ROWS:
+        cached = _read_enrichment_cache(cache_dir, "sector_strength", columns)
+        if len(cached) >= MIN_FRESH_SECTOR_MAPPING_ROWS and len(cached) > len(sector_map):
+            print(
+                f"[CACHE] sector_strength 当前映射过少 rows={len(sector_map)}，"
+                "保留上次成功缓存"
+            )
+            return _merge_enrichment_values(base, cached, ["主线板块", "板块强度分"])
+        if not cached.empty:
+            print(
+                f"[CACHE] sector_strength 缓存 rows={len(cached)} 不优于当前映射 "
+                f"rows={len(sector_map)}，使用当前多源结果"
+            )
     _write_enrichment_cache(cache_dir, "sector_strength", sector_map, columns)
     return (
         base.drop(columns=["主线板块", "板块强度分"], errors="ignore")
@@ -524,14 +529,80 @@ def _apply_sector_strength(base: pd.DataFrame, cache_dir: str | os.PathLike[str]
     )
 
 
+def _extract_sector_labels(sector_df: pd.DataFrame, name_col: str) -> dict[str, str]:
+    label_col = find_col(sector_df, ["label", "板块代码"])
+    if label_col is None:
+        return {}
+    labels: dict[str, str] = {}
+    for _, row in sector_df[[name_col, label_col]].dropna().iterrows():
+        name = str(row[name_col]).strip()
+        label = str(row[label_col]).strip()
+        if name and label:
+            labels[name] = label
+    return labels
+
+
+def _fetch_sina_sector_label_map() -> dict[str, str]:
+    labels: dict[str, str] = {}
+    if not hasattr(ak, "stock_sector_spot"):
+        return labels
+    for indicator in ["新浪行业", "行业", "概念"]:
+        try:
+            sector_df = ak.stock_sector_spot(indicator=indicator)
+        except Exception as e:
+            print(f"[WARN] 新浪板块列表获取失败：{indicator} {repr(e)}")
+            continue
+        name_col = find_col(sector_df, ["板块", "名称", "行业"])
+        label_col = find_col(sector_df, ["label", "板块代码"])
+        if name_col is None or label_col is None:
+            continue
+        for _, row in sector_df[[name_col, label_col]].dropna().iterrows():
+            name = str(row[name_col]).strip()
+            label = str(row[label_col]).strip()
+            if name and label:
+                labels.setdefault(name, label)
+    if labels:
+        print(f"[ENRICH] 新浪板块 label 映射 rows={len(labels)}")
+    return labels
+
+
+def _lookup_sector_label(sector_name: str, label_map: dict[str, str]) -> str | None:
+    normalized = sector_name.strip()
+    if not normalized:
+        return None
+    if normalized in label_map:
+        return label_map[normalized]
+    compact = normalized.replace(" ", "")
+    for name, label in label_map.items():
+        name_compact = name.replace(" ", "")
+        if compact == name_compact:
+            return label
+    for name, label in label_map.items():
+        name_compact = name.replace(" ", "")
+        if compact in name_compact or name_compact in compact:
+            return label
+    return None
+
+
+def _fetch_sector_constituents(sector_name: str, sector_label: str | None = None) -> pd.DataFrame | None:
+    if sector_label and hasattr(ak, "stock_sector_detail"):
+        try:
+            cons_df = ak.stock_sector_detail(sector=sector_label)
+        except Exception as e:
+            print(f"[WARN] 新浪板块成分获取失败：{sector_name}/{sector_label} {repr(e)}")
+            return None
+        if cons_df is not None and not cons_df.empty:
+            print(f"[ENRICH] 新浪板块成分 provider=stock_sector_detail sector={sector_name} label={sector_label} rows={len(cons_df)}")
+            return cons_df
+    return None
+
+
 def _apply_individual_fund_flow(base: pd.DataFrame, cache_dir: str | os.PathLike[str] | None = None) -> pd.DataFrame:
     base = base.copy()
     if "资金流向分" not in base.columns:
         base["资金流向分"] = 0.0
     columns = ["code", "资金流向分"]
     providers = [
-        ("stock_individual_fund_flow_rank", {"indicator": "今日"}),
-        ("stock_main_fund_flow", {"symbol": "全部股票"}),
         ("stock_fund_flow_individual", {"symbol": "即时"}),
     ]
 
@@ -577,10 +648,12 @@ def _apply_hot_rank(base: pd.DataFrame, cache_dir: str | os.PathLike[str] | None
     if "新闻催化分" not in base.columns:
         base["新闻催化分"] = 0.0
     columns = ["code", "新闻催化分"]
+    today = datetime.now().strftime("%Y%m%d")
     providers = [
-        ("stock_hot_rank_em", None),
-        ("stock_hot_rank_latest_em", None),
-        ("stock_hot_rank_detail_realtime_em", None),
+        ("stock_hot_follow_xq", {"symbol": "最热门"}),
+        ("stock_hot_tweet_xq", {"symbol": "最热门"}),
+        ("stock_hot_deal_xq", {"symbol": "最热门"}),
+        ("stock_hot_search_baidu", {"symbol": "A股", "date": today, "time": "今日"}),
     ]
 
     for provider_name, kwargs in providers:
@@ -590,11 +663,15 @@ def _apply_hot_rank(base: pd.DataFrame, cache_dir: str | os.PathLike[str] | None
             print(f"[WARN] 热度/新闻催化 provider={provider_name} failed: {repr(e)}")
             continue
 
-        code_col = find_col(hot_df, ["代码", "股票代码", "code"])
+        code_col = find_col(hot_df, ["代码", "股票代码", "code", "symbol", "股票"])
         rank_col = find_col(hot_df, ["排名", "排行", "当前排名"])
         if code_col is None or rank_col is None:
-            print(f"[WARN] 热度/新闻催化 provider={provider_name} 字段无法识别 columns={list(hot_df.columns)}")
-            continue
+            if code_col is None:
+                print(f"[WARN] 热度/新闻催化 provider={provider_name} 字段无法识别 columns={list(hot_df.columns)}")
+                continue
+            hot_df = hot_df.copy()
+            rank_col = "__rank"
+            hot_df[rank_col] = range(1, len(hot_df) + 1)
 
         hot = hot_df[[code_col, rank_col]].copy()
         hot["code"] = hot[code_col].apply(normalize_code)

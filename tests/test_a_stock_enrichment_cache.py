@@ -17,6 +17,8 @@ def disable_external_enrichment_providers(monkeypatch) -> None:
         "stock_fund_flow_concept",
         "stock_sector_spot",
         "stock_board_industry_cons_em",
+        "stock_board_concept_cons_em",
+        "stock_sector_detail",
         "stock_individual_fund_flow_rank",
         "stock_individual_fund_flow",
         "stock_main_fund_flow",
@@ -24,6 +26,15 @@ def disable_external_enrichment_providers(monkeypatch) -> None:
         "stock_hot_rank_em",
         "stock_hot_rank_latest_em",
         "stock_hot_rank_detail_realtime_em",
+        "stock_hot_follow_xq",
+        "stock_hot_tweet_xq",
+        "stock_hot_deal_xq",
+        "stock_hot_search_baidu",
+        "stock_lhb_detail_daily_sina",
+        "stock_lhb_detail_em",
+        "stock_lhb_stock_statistic_em",
+        "stock_lhb_ggtj_sina",
+        "stock_lhb_jgzz_sina",
     ]:
         monkeypatch.setattr(a_stock.ak, provider_name, unavailable, raising=False)
 
@@ -33,11 +44,11 @@ def test_individual_fund_flow_falls_back_to_last_successful_cache(monkeypatch, t
 
     monkeypatch.setattr(
         a_stock.ak,
-        "stock_individual_fund_flow_rank",
-        lambda indicator="今日": pd.DataFrame(
+        "stock_fund_flow_individual",
+        lambda symbol="即时": pd.DataFrame(
             [
-                {"代码": "000001", "主力净流入": 100},
-                {"代码": "000002", "主力净流入": 50},
+                {"股票代码": "000001", "净额": 100},
+                {"股票代码": "000002", "净额": 50},
             ]
         ),
         raising=False,
@@ -50,7 +61,7 @@ def test_individual_fund_flow_falls_back_to_last_successful_cache(monkeypatch, t
 
     monkeypatch.setattr(
         a_stock.ak,
-        "stock_individual_fund_flow_rank",
+        "stock_fund_flow_individual",
         raise_connection_error,
         raising=False,
     )
@@ -60,29 +71,17 @@ def test_individual_fund_flow_falls_back_to_last_successful_cache(monkeypatch, t
     assert second.loc[second["code"] == "000002", "资金流向分"].iloc[0] == 8
 
 
-def test_individual_fund_flow_uses_secondary_provider_when_rank_fails(monkeypatch, tmp_path) -> None:
+def test_individual_fund_flow_leaves_zero_when_ths_provider_fails_without_cache(monkeypatch, tmp_path) -> None:
     quote_df = pd.DataFrame([{"code": "000001"}, {"code": "000002"}])
 
-    def raise_connection_error(indicator="今日") -> pd.DataFrame:
-        raise ConnectionError("simulated rank failure")
+    def raise_connection_error(symbol="即时") -> pd.DataFrame:
+        raise ConnectionError("simulated ths failure")
 
-    monkeypatch.setattr(a_stock.ak, "stock_individual_fund_flow_rank", raise_connection_error, raising=False)
-    monkeypatch.setattr(
-        a_stock.ak,
-        "stock_main_fund_flow",
-        lambda symbol="全部股票": pd.DataFrame(
-            [
-                {"股票代码": "000001", "净流入": 200},
-                {"股票代码": "000002", "净流入": 100},
-            ]
-        ),
-        raising=False,
-    )
+    monkeypatch.setattr(a_stock.ak, "stock_fund_flow_individual", raise_connection_error, raising=False)
 
     enrichment = a_stock.build_mainline_enrichment(quote_df, cache_dir=tmp_path)
 
-    assert enrichment.loc[enrichment["code"] == "000001", "资金流向分"].iloc[0] == 16
-    assert enrichment.loc[enrichment["code"] == "000002", "资金流向分"].iloc[0] == 8
+    assert enrichment["资金流向分"].eq(0).all()
 
 
 def test_individual_fund_flow_parses_chinese_money_units(monkeypatch, tmp_path) -> None:
@@ -121,20 +120,20 @@ def test_individual_fund_flow_can_be_called_directly_without_existing_score_colu
     assert enrichment.loc[0, "资金流向分"] == 16
 
 
-def test_hot_rank_uses_latest_provider_when_primary_fails(monkeypatch, tmp_path) -> None:
+def test_hot_rank_uses_xueqiu_secondary_provider_when_primary_fails(monkeypatch, tmp_path) -> None:
     quote_df = pd.DataFrame([{"code": "000001"}, {"code": "000002"}])
 
-    def raise_connection_error() -> pd.DataFrame:
+    def raise_connection_error(symbol="最热门") -> pd.DataFrame:
         raise ConnectionError("simulated hot rank failure")
 
-    monkeypatch.setattr(a_stock.ak, "stock_hot_rank_em", raise_connection_error, raising=False)
+    monkeypatch.setattr(a_stock.ak, "stock_hot_follow_xq", raise_connection_error, raising=False)
     monkeypatch.setattr(
         a_stock.ak,
-        "stock_hot_rank_latest_em",
-        lambda: pd.DataFrame(
+        "stock_hot_tweet_xq",
+        lambda symbol="最热门": pd.DataFrame(
             [
-                {"代码": "000001", "当前排名": 1},
-                {"代码": "000002", "当前排名": 100},
+                {"代码": "000001", "排名": 1},
+                {"代码": "000002", "排名": 100},
             ]
         ),
         raising=False,
@@ -151,8 +150,8 @@ def test_hot_rank_can_be_called_directly_without_existing_score_column(monkeypat
 
     monkeypatch.setattr(
         a_stock.ak,
-        "stock_hot_rank_em",
-        lambda: pd.DataFrame([{"代码": "000001", "当前排名": 1}]),
+        "stock_hot_follow_xq",
+        lambda symbol="最热门": pd.DataFrame([{"代码": "000001", "排名": 1}]),
         raising=False,
     )
 
@@ -161,7 +160,24 @@ def test_hot_rank_can_be_called_directly_without_existing_score_column(monkeypat
     assert enrichment.loc[0, "新闻催化分"] == 10
 
 
-def test_sector_strength_uses_industry_fund_flow_fallback_without_constituents(monkeypatch, tmp_path) -> None:
+def test_lhb_today_uses_sina_statistic_when_daily_detail_fails(monkeypatch) -> None:
+    def fail_sina(date: str) -> pd.DataFrame:
+        raise ConnectionError("sina lhb failed")
+
+    monkeypatch.setattr(a_stock.ak, "stock_lhb_detail_daily_sina", fail_sina, raising=False)
+    monkeypatch.setattr(
+        a_stock.ak,
+        "stock_lhb_ggtj_sina",
+        lambda symbol="5": pd.DataFrame([{"股票代码": "000001", "名称": "龙虎股份"}]),
+        raising=False,
+    )
+
+    lhb = a_stock.get_lhb_today()
+
+    assert lhb["code"].tolist() == ["000001"]
+
+
+def test_sector_strength_does_not_use_stock_name_keyword_as_constituent_fallback(monkeypatch, tmp_path) -> None:
     quote_df = pd.DataFrame(
         [
             {"code": "000001", "名称": "强势科技"},
@@ -187,8 +203,8 @@ def test_sector_strength_uses_industry_fund_flow_fallback_without_constituents(m
 
     enrichment = a_stock.build_mainline_enrichment(quote_df, cache_dir=tmp_path)
 
-    assert enrichment.loc[enrichment["code"] == "000001", "主线板块"].iloc[0] == "科技"
-    assert enrichment.loc[enrichment["code"] == "000001", "板块强度分"].iloc[0] > 0
+    assert enrichment["主线板块"].fillna("").eq("").all()
+    assert enrichment["板块强度分"].eq(0).all()
 
 
 def test_sector_strength_limits_each_sector_to_top_100_constituents(monkeypatch, tmp_path) -> None:
@@ -197,16 +213,20 @@ def test_sector_strength_limits_each_sector_to_top_100_constituents(monkeypatch,
 
     monkeypatch.setattr(
         a_stock.ak,
-        "stock_sector_fund_flow_rank",
-        lambda indicator="今日", sector_type="行业资金流": pd.DataFrame(
-            [{"行业": "科技", "净额": "20亿"}]
-        ),
+        "stock_fund_flow_industry",
+        lambda symbol="即时": pd.DataFrame([{"行业": "科技", "净流入": "20亿"}]),
         raising=False,
     )
     monkeypatch.setattr(
         a_stock.ak,
-        "stock_board_industry_cons_em",
-        lambda symbol: pd.DataFrame([{"代码": code} for code in codes]),
+        "stock_sector_spot",
+        lambda indicator="新浪行业": pd.DataFrame([{"label": "gn_kj", "板块": "科技"}]),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        a_stock.ak,
+        "stock_sector_detail",
+        lambda sector: pd.DataFrame([{"symbol": code} for code in codes]),
         raising=False,
     )
 
@@ -215,3 +235,94 @@ def test_sector_strength_limits_each_sector_to_top_100_constituents(monkeypatch,
     assert int((enrichment["板块强度分"] > 0).sum()) == 100
     assert enrichment.loc[enrichment["code"] == "000100", "板块强度分"].iloc[0] > 0
     assert enrichment.loc[enrichment["code"] == "000101", "板块强度分"].iloc[0] == 0
+
+
+def test_sector_strength_uses_cache_when_fresh_mapping_is_too_sparse(monkeypatch, tmp_path) -> None:
+    quote_df = pd.DataFrame(
+        [
+            {"code": "000001", "名称": "科技股份"},
+            {"code": "000002", "名称": "缓存股份"},
+        ]
+    )
+    cache_path = tmp_path / "sector_strength.csv"
+    pd.DataFrame(
+        [{"code": "000002", "主线板块": "缓存板块", "板块强度分": 22}]
+    ).to_csv(cache_path, index=False)
+
+    monkeypatch.setattr(
+        a_stock.ak,
+        "stock_fund_flow_industry",
+        lambda symbol="即时": pd.DataFrame([{"行业": "科技", "净流入": "20亿"}]),
+        raising=False,
+    )
+
+    enrichment = a_stock.build_mainline_enrichment(quote_df, cache_dir=tmp_path)
+
+    assert enrichment.loc[enrichment["code"] == "000002", "主线板块"].iloc[0] == "缓存板块"
+    assert enrichment.loc[enrichment["code"] == "000002", "板块强度分"].iloc[0] == 22
+
+
+def test_sector_strength_replaces_smaller_stale_cache_with_fresher_sparse_mapping(monkeypatch, tmp_path) -> None:
+    codes = [f"{index:06d}" for index in range(1, 89)]
+    quote_df = pd.DataFrame([{"code": code} for code in codes])
+    cache_path = tmp_path / "sector_strength.csv"
+    pd.DataFrame(
+        [
+            {"code": f"{index:06d}", "主线板块": "旧缓存", "板块强度分": 18}
+            for index in range(1, 30)
+        ]
+    ).to_csv(cache_path, index=False)
+
+    monkeypatch.setattr(
+        a_stock.ak,
+        "stock_fund_flow_industry",
+        lambda symbol="即时": pd.DataFrame([{"行业": "新浪映射", "净流入": "20亿"}]),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        a_stock.ak,
+        "stock_sector_spot",
+        lambda indicator="新浪行业": pd.DataFrame([{"label": "gn_xx", "板块": "新浪映射"}]),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        a_stock.ak,
+        "stock_sector_detail",
+        lambda sector: pd.DataFrame([{"symbol": code} for code in codes]),
+        raising=False,
+    )
+
+    enrichment = a_stock.build_mainline_enrichment(quote_df, cache_dir=tmp_path)
+
+    assert int((enrichment["板块强度分"] > 0).sum()) == 88
+    assert enrichment["主线板块"].eq("新浪映射").all()
+
+
+def test_sector_strength_uses_sina_sector_detail_without_eastmoney(monkeypatch, tmp_path) -> None:
+    quote_df = pd.DataFrame([{"code": "000001", "名称": "可靠股份"}])
+
+    monkeypatch.setattr(
+        a_stock.ak,
+        "stock_fund_flow_industry",
+        lambda symbol="即时": pd.DataFrame([{"行业": "科技", "净流入": "20亿"}]),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        a_stock.ak,
+        "stock_sector_spot",
+        lambda indicator="新浪行业": pd.DataFrame(
+            [{"label": "gn_kj", "板块": "科技", "涨跌幅": 5.0}]
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        a_stock.ak,
+        "stock_sector_detail",
+        lambda sector: pd.DataFrame([{"symbol": "sz000001", "name": "可靠股份"}]),
+        raising=False,
+    )
+
+    enrichment = a_stock.build_mainline_enrichment(quote_df, cache_dir=tmp_path)
+
+    assert enrichment.loc[0, "主线板块"] == "科技"
+    assert enrichment.loc[0, "板块强度分"] == 25
