@@ -202,6 +202,39 @@ def test_mainline_strategy_does_not_allow_weak_fund_path_into_core() -> None:
     assert candidates_df.iloc[0]["买入观察等级"] != "A_核心关注"
 
 
+def test_mainline_strategy_degrades_to_watch_when_enrichment_sources_fail() -> None:
+    quote_df = pd.DataFrame(
+        [
+            {
+                "code": "000007",
+                "代码": "000007",
+                "名称": "强势缺增强",
+                "最新价": 18.0,
+                "涨跌幅": 6.2,
+                "成交额": 3_000_000_000,
+                "换手率": 12.0,
+                "有换手率数据": True,
+                "数据源": "test",
+            }
+        ]
+    )
+
+    candidates_df, _ = build_mainline_candidates(
+        config=MainlineStrategyConfig(),
+        quote_df=quote_df,
+        amount_rank_df=quote_df[["code"]],
+        gain_rank_df=quote_df[["code"]],
+        lhb_df=pd.DataFrame(),
+        enrichment_df=pd.DataFrame(
+            [{"code": "000007", "板块强度分": 0, "资金流向分": 0, "新闻催化分": 0}]
+        ),
+    )
+
+    assert candidates_df.iloc[0]["个股强度分"] >= 18
+    assert candidates_df.iloc[0]["主线强势分"] >= 40
+    assert candidates_df.iloc[0]["买入观察等级"] == "B_继续观察"
+
+
 def test_mainline_strategy_excludes_star_market_when_market_is_shrinking() -> None:
     quote_df = pd.DataFrame(
         [

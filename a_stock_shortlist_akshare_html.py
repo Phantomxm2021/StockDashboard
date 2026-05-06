@@ -45,6 +45,7 @@ import time
 import argparse
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Optional, List, Set, Callable, Tuple, Dict
 
 import pandas as pd
@@ -77,6 +78,21 @@ class StrategyConfig(MainlineStrategyConfig):
 
 def safe_numeric(series: pd.Series) -> pd.Series:
     return pd.to_numeric(series, errors="coerce")
+
+
+def safe_money_numeric(series: pd.Series) -> pd.Series:
+    text = (
+        series.astype(str)
+        .str.strip()
+        .str.replace(",", "", regex=False)
+        .str.replace("%", "", regex=False)
+    )
+    multiplier = pd.Series(1.0, index=series.index)
+    multiplier = multiplier.mask(text.str.contains("亿", na=False), 100_000_000.0)
+    multiplier = multiplier.mask(text.str.contains("万", na=False), 10_000.0)
+    numeric_text = text.str.replace("亿", "", regex=False).str.replace("万", "", regex=False)
+    numeric_text = numeric_text.str.replace("--", "", regex=False)
+    return pd.to_numeric(numeric_text, errors="coerce") * multiplier
 
 
 def find_col(df: pd.DataFrame, keywords: List[str]) -> Optional[str]:
@@ -301,20 +317,117 @@ def get_gain_rank_from_quotes(quote_df: pd.DataFrame, top_n: int) -> pd.DataFram
 # 主线强势增强数据
 # ============================================================
 
-def build_mainline_enrichment(quote_df: pd.DataFrame) -> pd.DataFrame:
+DEFAULT_ENRICHMENT_CACHE_DIR = Path("reports/cn/enrichment_cache")
+
+
+def _resolve_enrichment_cache_dir(cache_dir: str | os.PathLike[str] | None) -> Path:
+    if cache_dir is not None:
+        return Path(cache_dir)
+    return Path(os.getenv("STOCK_ENRICHMENT_CACHE_DIR", str(DEFAULT_ENRICHMENT_CACHE_DIR)))
+
+
+def _enrichment_cache_path(cache_dir: str | os.PathLike[str] | None, name: str) -> Path:
+    return _resolve_enrichment_cache_dir(cache_dir) / f"{name}.csv"
+
+
+def _read_enrichment_cache(
+    cache_dir: str | os.PathLike[str] | None,
+    name: str,
+    columns: list[str],
+) -> pd.DataFrame:
+    path = _enrichment_cache_path(cache_dir, name)
+    if not path.exists():
+        print(f"[CACHE] {name} 无可用缓存：{path}")
+        return pd.DataFrame(columns=columns)
+    try:
+        cached = pd.read_csv(path, dtype={"code": str})
+    except Exception as e:
+        print(f"[WARN] {name} 缓存读取失败：{repr(e)}")
+        return pd.DataFrame(columns=columns)
+    missing = [column for column in columns if column not in cached.columns]
+    if missing:
+        print(f"[WARN] {name} 缓存字段缺失：{missing}")
+        return pd.DataFrame(columns=columns)
+    print(f"[CACHE] {name} 使用上次成功缓存：{path} rows={len(cached)}")
+    return cached[columns].copy()
+
+
+def _write_enrichment_cache(
+    cache_dir: str | os.PathLike[str] | None,
+    name: str,
+    df: pd.DataFrame,
+    columns: list[str],
+) -> None:
+    if df.empty:
+        return
+    path = _enrichment_cache_path(cache_dir, name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df[columns].drop_duplicates("code", keep="first").to_csv(path, index=False, encoding="utf-8-sig")
+    print(f"[CACHE] {name} 已更新缓存：{path} rows={len(df)}")
+
+
+def _merge_enrichment_values(
+    base: pd.DataFrame,
+    values: pd.DataFrame,
+    value_columns: list[str],
+) -> pd.DataFrame:
+    if values.empty:
+        return base
+    merged = base.merge(values[["code", *value_columns]], on="code", how="left", suffixes=("", "_cached"))
+    for column in value_columns:
+        cached_column = f"{column}_cached"
+        if cached_column in merged.columns:
+            if column == "主线板块":
+                merged[column] = merged[cached_column].fillna(merged[column])
+            else:
+                merged[column] = merged[cached_column].fillna(merged[column])
+            merged = merged.drop(columns=[cached_column])
+    return merged
+
+
+def _call_ak_provider(name: str, kwargs: dict | None = None) -> pd.DataFrame:
+    if not hasattr(ak, name):
+        raise AttributeError(f"AKShare provider not found: {name}")
+    fn = getattr(ak, name)
+    try:
+        result = fn(**(kwargs or {}))
+    except TypeError:
+        result = fn()
+    if result is None or result.empty:
+        raise ValueError(f"{name} returned empty data")
+    print(f"[ENRICH] provider={name} status=success rows={len(result)}")
+    return result
+
+
+def _try_ak_providers(providers: list[tuple[str, dict | None]], label: str) -> tuple[str, pd.DataFrame] | None:
+    for name, kwargs in providers:
+        try:
+            return name, _call_ak_provider(name, kwargs)
+        except Exception as e:
+            print(f"[WARN] {label} provider={name} failed: {repr(e)}")
+    return None
+
+
+def build_mainline_enrichment(
+    quote_df: pd.DataFrame,
+    cache_dir: str | os.PathLike[str] | None = None,
+) -> pd.DataFrame:
     """
     尽量用 AKShare 补充主线强度数据。
-    数据源波动较大，失败时返回 0 分增强，不阻断基础观察池生成。
+    数据源波动较大，失败时优先回退到最近一次成功缓存，不阻断基础观察池生成。
     """
-    base = quote_df[["code"]].copy()
+    base_columns = ["code"]
+    if "名称" in quote_df.columns:
+        base_columns.append("名称")
+    base = quote_df[base_columns].copy()
     base["主线板块"] = ""
     base["板块强度分"] = 0.0
     base["资金流向分"] = 0.0
     base["新闻催化分"] = 0.0
 
-    base = _apply_sector_strength(base)
-    base = _apply_individual_fund_flow(base)
-    base = _apply_hot_rank(base)
+    base = _apply_sector_strength(base, cache_dir=cache_dir)
+    base = _apply_individual_fund_flow(base, cache_dir=cache_dir)
+    base = _apply_hot_rank(base, cache_dir=cache_dir)
     return base
 
 
@@ -329,54 +442,77 @@ def build_market_context(quote_df: pd.DataFrame) -> MarketContext:
     return MarketContext(state=state, amount_yi=round(amount_yi, 2))
 
 
-def _apply_sector_strength(base: pd.DataFrame) -> pd.DataFrame:
-    if not hasattr(ak, "stock_sector_fund_flow_rank") or not hasattr(ak, "stock_board_industry_cons_em"):
-        return base
-    try:
-        sector_df = ak.stock_sector_fund_flow_rank(indicator="今日", sector_type="行业资金流")
-    except Exception as e:
-        print(f"[WARN] 行业板块资金流获取失败：{repr(e)}")
-        return base
+def _apply_sector_strength(base: pd.DataFrame, cache_dir: str | os.PathLike[str] | None = None) -> pd.DataFrame:
+    columns = ["code", "主线板块", "板块强度分"]
+    fetched = _try_ak_providers(
+        [
+            ("stock_sector_fund_flow_rank", {"indicator": "今日", "sector_type": "行业资金流"}),
+            ("stock_fund_flow_industry", {"symbol": "即时"}),
+            ("stock_fund_flow_concept", {"symbol": "即时"}),
+            ("stock_sector_spot", {"indicator": "新浪行业"}),
+        ],
+        "行业板块资金流",
+    )
 
-    if sector_df is None or sector_df.empty:
-        return base
+    if fetched is None:
+        cached = _read_enrichment_cache(cache_dir, "sector_strength", columns)
+        return _merge_enrichment_values(base, cached, ["主线板块", "板块强度分"])
 
+    provider_name, sector_df = fetched
     name_col = find_col(sector_df, ["名称", "行业", "板块"])
-    flow_col = find_col(sector_df, ["主力净流入", "净流入", "资金净流入"])
+    flow_col = find_col(sector_df, ["主力净流入", "净流入", "资金净流入", "净额"])
+    change_col = find_col(sector_df, ["涨跌幅", "涨幅"])
     if name_col is None:
-        return base
+        cached = _read_enrichment_cache(cache_dir, "sector_strength", columns)
+        return _merge_enrichment_values(base, cached, ["主线板块", "板块强度分"])
 
     sector = sector_df.copy()
     if flow_col is not None:
-        sector["板块资金净流入"] = safe_numeric(sector[flow_col]).fillna(0)
+        sector["板块资金净流入"] = safe_money_numeric(sector[flow_col]).fillna(0)
         sector = sector.sort_values("板块资金净流入", ascending=False)
+    elif change_col is not None:
+        sector["板块涨跌幅"] = safe_numeric(sector[change_col]).fillna(0)
+        sector = sector.sort_values("板块涨跌幅", ascending=False)
     top_sectors = [str(value) for value in sector[name_col].head(10).tolist() if str(value).strip()]
 
     mappings: list[pd.DataFrame] = []
-    for index, sector_name in enumerate(top_sectors):
-        try:
-            cons_df = ak.stock_board_industry_cons_em(symbol=sector_name)
-        except Exception as e:
-            print(f"[WARN] 行业成分获取失败：{sector_name} {repr(e)}")
-            continue
-        code_col = find_col(cons_df, ["代码", "股票代码", "code"])
-        if code_col is None:
-            continue
-        score = max(25 - index * 2.5, 5)
-        mapping = cons_df[[code_col]].copy()
-        mapping["code"] = mapping[code_col].apply(normalize_code)
-        mapping["主线板块"] = sector_name
-        mapping["板块强度分"] = score
-        mappings.append(mapping[["code", "主线板块", "板块强度分"]])
+    if hasattr(ak, "stock_board_industry_cons_em"):
+        for index, sector_name in enumerate(top_sectors):
+            try:
+                cons_df = ak.stock_board_industry_cons_em(symbol=sector_name)
+            except Exception as e:
+                print(f"[WARN] 行业成分获取失败：{sector_name} {repr(e)}")
+                continue
+            code_col = find_col(cons_df, ["代码", "股票代码", "code"])
+            if code_col is None:
+                continue
+            score = max(25 - index * 2.5, 5)
+            mapping = cons_df[[code_col]].copy()
+            mapping["code"] = mapping[code_col].apply(normalize_code)
+            mapping["主线板块"] = sector_name
+            mapping["板块强度分"] = score
+            mappings.append(mapping[["code", "主线板块", "板块强度分"]])
+
+    if not mappings and "名称" in base.columns:
+        for index, sector_name in enumerate(top_sectors):
+            matched = base[base["名称"].astype(str).str.contains(sector_name, na=False, regex=False)][["code"]].copy()
+            if matched.empty:
+                continue
+            matched["主线板块"] = sector_name
+            matched["板块强度分"] = max(18 - index * 2, 4)
+            mappings.append(matched[["code", "主线板块", "板块强度分"]])
 
     if not mappings:
-        return base
+        print(f"[WARN] 行业板块 provider={provider_name} 未匹配到候选股")
+        cached = _read_enrichment_cache(cache_dir, "sector_strength", columns)
+        return _merge_enrichment_values(base, cached, ["主线板块", "板块强度分"])
 
     sector_map = (
         pd.concat(mappings, ignore_index=True)
         .sort_values("板块强度分", ascending=False)
         .drop_duplicates("code", keep="first")
     )
+    _write_enrichment_cache(cache_dir, "sector_strength", sector_map, columns)
     return (
         base.drop(columns=["主线板块", "板块强度分"], errors="ignore")
         .merge(sector_map, on="code", how="left")
@@ -387,65 +523,87 @@ def _apply_sector_strength(base: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def _apply_individual_fund_flow(base: pd.DataFrame) -> pd.DataFrame:
-    if not hasattr(ak, "stock_individual_fund_flow_rank"):
-        return base
-    try:
-        flow_df = ak.stock_individual_fund_flow_rank(indicator="今日")
-    except Exception as e:
-        print(f"[WARN] 个股资金流向获取失败：{repr(e)}")
-        return base
+def _apply_individual_fund_flow(base: pd.DataFrame, cache_dir: str | os.PathLike[str] | None = None) -> pd.DataFrame:
+    columns = ["code", "资金流向分"]
+    providers = [
+        ("stock_individual_fund_flow_rank", {"indicator": "今日"}),
+        ("stock_main_fund_flow", {"symbol": "全部股票"}),
+        ("stock_fund_flow_individual", {"symbol": "即时"}),
+    ]
 
-    if flow_df is None or flow_df.empty:
-        return base
+    for provider_name, kwargs in providers:
+        try:
+            flow_df = _call_ak_provider(provider_name, kwargs)
+        except Exception as e:
+            print(f"[WARN] 个股资金流向 provider={provider_name} failed: {repr(e)}")
+            continue
 
-    code_col = find_col(flow_df, ["代码", "股票代码", "code"])
-    flow_col = find_col(flow_df, ["主力净流入", "净流入", "资金净流入"])
-    if code_col is None or flow_col is None:
-        return base
+        code_col = find_col(flow_df, ["代码", "股票代码", "code"])
+        flow_col = find_col(flow_df, ["主力净流入", "净流入", "资金净流入", "净额"])
+        if code_col is None or flow_col is None:
+            print(f"[WARN] 个股资金流向 provider={provider_name} 字段无法识别 columns={list(flow_df.columns)}")
+            continue
 
-    flow = flow_df[[code_col, flow_col]].copy()
-    flow["code"] = flow[code_col].apply(normalize_code)
-    flow["资金净流入"] = safe_numeric(flow[flow_col])
-    flow = flow.dropna(subset=["资金净流入"])
-    if flow.empty:
-        return base
+        flow = flow_df[[code_col, flow_col]].copy()
+        flow["code"] = flow[code_col].apply(normalize_code)
+        flow["资金净流入"] = safe_money_numeric(flow[flow_col])
+        flow = flow.dropna(subset=["资金净流入"])
+        flow = flow.sort_values("资金净流入", ascending=False).drop_duplicates("code", keep="first")
+        if flow.empty:
+            print(f"[WARN] 个股资金流向 provider={provider_name} 无有效净流入数据")
+            continue
 
-    positive = flow["资金净流入"].clip(lower=0)
-    max_value = positive.max()
-    if pd.isna(max_value) or max_value <= 0:
-        return base
-    flow["资金流向分"] = (positive / max_value * 16).clip(upper=16)
-    return base.merge(flow[["code", "资金流向分"]], on="code", how="left", suffixes=("", "_fund")).assign(
-        资金流向分=lambda df: df["资金流向分_fund"].fillna(df["资金流向分"])
-    ).drop(columns=["资金流向分_fund"])
+        positive = flow["资金净流入"].clip(lower=0)
+        max_value = positive.max()
+        if pd.isna(max_value) or max_value <= 0:
+            print(f"[WARN] 个股资金流向 provider={provider_name} 正向净流入为空")
+            continue
+        flow["资金流向分"] = (positive / max_value * 16).clip(upper=16)
+        _write_enrichment_cache(cache_dir, "individual_fund_flow", flow, columns)
+        return base.merge(flow[["code", "资金流向分"]], on="code", how="left", suffixes=("", "_fund")).assign(
+            资金流向分=lambda df: df["资金流向分_fund"].fillna(df["资金流向分"])
+        ).drop(columns=["资金流向分_fund"])
+
+    cached = _read_enrichment_cache(cache_dir, "individual_fund_flow", columns)
+    return _merge_enrichment_values(base, cached, ["资金流向分"])
 
 
-def _apply_hot_rank(base: pd.DataFrame) -> pd.DataFrame:
-    if not hasattr(ak, "stock_hot_rank_em"):
-        return base
-    try:
-        hot_df = ak.stock_hot_rank_em()
-    except Exception as e:
-        print(f"[WARN] 热度/新闻催化获取失败：{repr(e)}")
-        return base
+def _apply_hot_rank(base: pd.DataFrame, cache_dir: str | os.PathLike[str] | None = None) -> pd.DataFrame:
+    columns = ["code", "新闻催化分"]
+    providers = [
+        ("stock_hot_rank_em", None),
+        ("stock_hot_rank_latest_em", None),
+        ("stock_hot_rank_detail_realtime_em", None),
+    ]
 
-    if hot_df is None or hot_df.empty:
-        return base
+    for provider_name, kwargs in providers:
+        try:
+            hot_df = _call_ak_provider(provider_name, kwargs)
+        except Exception as e:
+            print(f"[WARN] 热度/新闻催化 provider={provider_name} failed: {repr(e)}")
+            continue
 
-    code_col = find_col(hot_df, ["代码", "股票代码", "code"])
-    rank_col = find_col(hot_df, ["排名", "排行", "当前排名"])
-    if code_col is None or rank_col is None:
-        return base
+        code_col = find_col(hot_df, ["代码", "股票代码", "code"])
+        rank_col = find_col(hot_df, ["排名", "排行", "当前排名"])
+        if code_col is None or rank_col is None:
+            print(f"[WARN] 热度/新闻催化 provider={provider_name} 字段无法识别 columns={list(hot_df.columns)}")
+            continue
 
-    hot = hot_df[[code_col, rank_col]].copy()
-    hot["code"] = hot[code_col].apply(normalize_code)
-    hot["热度排名"] = safe_numeric(hot[rank_col])
-    hot = hot.dropna(subset=["热度排名"])
-    hot["新闻催化分"] = (10 - (hot["热度排名"].clip(lower=1, upper=100) - 1) / 99 * 10).clip(lower=0, upper=10)
-    return base.merge(hot[["code", "新闻催化分"]], on="code", how="left", suffixes=("", "_hot")).assign(
-        新闻催化分=lambda df: df["新闻催化分_hot"].fillna(df["新闻催化分"])
-    ).drop(columns=["新闻催化分_hot"])
+        hot = hot_df[[code_col, rank_col]].copy()
+        hot["code"] = hot[code_col].apply(normalize_code)
+        hot["热度排名"] = safe_numeric(hot[rank_col])
+        hot = hot.dropna(subset=["热度排名"])
+        if hot.empty:
+            print(f"[WARN] 热度/新闻催化 provider={provider_name} 无有效排名数据")
+            continue
+        hot["新闻催化分"] = (10 - (hot["热度排名"].clip(lower=1, upper=100) - 1) / 99 * 10).clip(lower=0, upper=10)
+        _write_enrichment_cache(cache_dir, "hot_rank", hot, columns)
+        return base.merge(hot[["code", "新闻催化分"]], on="code", how="left", suffixes=("", "_hot")).assign(
+            新闻催化分=lambda df: df["新闻催化分_hot"].fillna(df["新闻催化分"])
+        ).drop(columns=["新闻催化分_hot"])
+
+    cached = _read_enrichment_cache(cache_dir, "hot_rank", columns)
+    return _merge_enrichment_values(base, cached, ["新闻催化分"])
 
 
 def classify_morning_buy_level(row: pd.Series) -> str:

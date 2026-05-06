@@ -116,6 +116,32 @@ def test_missing_after_close_report_returns_empty_payload(tmp_path: Path) -> Non
     assert response.json()["rows"] == []
 
 
+def test_after_close_report_accepts_level_values_without_prefix(tmp_path: Path) -> None:
+    report_dir = tmp_path / "reports"
+    report_dir.mkdir(parents=True)
+    rows = [
+        {"code": "000001", "代码": "000001", "名称": "示例一", "买入观察等级": "核心关注"},
+        {"code": "000002", "代码": "000002", "名称": "示例二", "买入观察等级": "继续观察"},
+        {"code": "000003", "代码": "000003", "名称": "示例三", "买入观察等级": "暂缓跟踪"},
+    ]
+    pd.DataFrame(rows).to_csv(report_dir / "latest_candidates.csv", index=False)
+    client = make_client(tmp_path)
+
+    response = client.get(
+        "/api/reports/after-close?pool=core",
+        headers=auth_headers(client),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["pools"] == [
+        {"key": "core", "title": "核心关注", "count": 1},
+        {"key": "watch", "title": "继续观察", "count": 1},
+        {"key": "defer", "title": "暂缓跟踪", "count": 1},
+        {"key": "all", "title": "全部候选", "count": 3},
+    ]
+    assert response.json()["rows"][0]["名称"] == "示例一"
+
+
 def test_status_is_root_only(tmp_path: Path) -> None:
     client = make_client(tmp_path)
 

@@ -263,6 +263,7 @@ def _watch_level(row: pd.Series, config: MainlineStrategyConfig) -> str:
     has_mainline_confirmation = sector_score >= 12 and fund_score >= 6
     has_catalyst_confirmation = sector_score >= 16 and catalyst_score >= 6
     has_strong_fund_confirmation = fund_score >= 8 and individual_score >= 18
+    enrichment_missing = sector_score == 0 and fund_score == 0
     if str(row.get("市场环境", "")) == "放量" and _is_star_market(row.get("code", "")) and fund_score < 6:
         return "B_继续观察" if score >= config.b_pool_min_score else "C_暂缓跟踪"
     if has_strong_fund_confirmation:
@@ -272,6 +273,8 @@ def _watch_level(row: pd.Series, config: MainlineStrategyConfig) -> str:
         required_score -= 5
     if score >= required_score and (has_mainline_confirmation or has_catalyst_confirmation):
         return "A_核心关注"
+    if enrichment_missing and individual_score >= 18 and score >= 40:
+        return "B_继续观察"
     if score >= config.b_pool_min_score:
         return "B_继续观察"
     return "C_暂缓跟踪"

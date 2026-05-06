@@ -12,16 +12,16 @@ from stock_dashboard.markets import ReportTypeDefinition, get_market_definition
 
 
 AFTER_CLOSE_POOLS = [
-    ("core", "核心关注", "买入观察等级", "A_"),
-    ("watch", "继续观察", "买入观察等级", "B_"),
-    ("defer", "暂缓跟踪", "买入观察等级", "C_"),
+    ("core", "核心关注", "买入观察等级", ("A_", "核心关注")),
+    ("watch", "继续观察", "买入观察等级", ("B_", "继续观察")),
+    ("defer", "暂缓跟踪", "买入观察等级", ("C_", "暂缓跟踪")),
     ("all", "全部候选", None, None),
 ]
 
 MORNING_POOLS = [
-    ("core", "核心关注", "早盘买入等级", "A_早盘重点确认"),
-    ("watch", "继续观察", "早盘买入等级", "B_继续观察"),
-    ("defer", "暂缓跟踪", "早盘买入等级", "C_"),
+    ("core", "核心关注", "早盘买入等级", ("A_早盘重点确认", "早盘重点确认")),
+    ("watch", "继续观察", "早盘买入等级", ("B_继续观察", "继续观察")),
+    ("defer", "暂缓跟踪", "早盘买入等级", ("C_", "暂不考虑", "不追", "放弃")),
     ("all", "全部候选", None, None),
 ]
 
@@ -136,7 +136,7 @@ def _read_csv(path: Path) -> pd.DataFrame:
 
 def _pool_summary(
     df: pd.DataFrame,
-    definition: tuple[str, str, str | None, str | None],
+    definition: tuple[str, str, str | None, tuple[str, ...] | None],
 ) -> dict[str, object]:
     key, title, _, _ = definition
     return {"key": key, "title": title, "count": len(_filter_pool_from_definition(df, definition))}
@@ -144,7 +144,7 @@ def _pool_summary(
 
 def _filter_pool(
     df: pd.DataFrame,
-    pool_defs: list[tuple[str, str, str | None, str | None]],
+    pool_defs: list[tuple[str, str, str | None, tuple[str, ...] | None]],
     pool_key: str,
 ) -> pd.DataFrame:
     for definition in pool_defs:
@@ -155,7 +155,7 @@ def _filter_pool(
 
 def _filter_pool_from_definition(
     df: pd.DataFrame,
-    definition: tuple[str, str, str | None, str | None],
+    definition: tuple[str, str, str | None, tuple[str, ...] | None],
 ) -> pd.DataFrame:
     if df.empty:
         return df.copy()
@@ -164,7 +164,13 @@ def _filter_pool_from_definition(
         return df.copy()
     if column not in df.columns:
         return pd.DataFrame(columns=df.columns)
-    return df[df[column].astype(str).str.startswith(prefix)].copy()
+    raw_values = df[column].astype(str)
+    display_values = raw_values.map(_strip_level_prefix)
+    mask = pd.Series(False, index=df.index)
+    for item in prefix:
+        normalized_item = _strip_level_prefix(item)
+        mask = mask | raw_values.str.startswith(item) | display_values.str.startswith(normalized_item)
+    return df[mask].copy()
 
 
 def _records(df: pd.DataFrame) -> list[dict[str, Any]]:
