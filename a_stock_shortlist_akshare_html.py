@@ -443,21 +443,32 @@ def build_market_context(quote_df: pd.DataFrame) -> MarketContext:
 
 
 def _fetch_sector_fund_flow() -> tuple[str, pd.DataFrame, str | None, str | None, str | None] | None:
-    fetched = _try_ak_providers(
-        [
-            ("stock_fund_flow_industry", {"symbol": "即时"}),
-            ("stock_fund_flow_concept", {"symbol": "即时"}),
-            ("stock_sector_spot", {"indicator": "新浪行业"}),
-        ],
-        "行业板块资金流",
-    )
-    if fetched is None:
+    candidates = _fetch_sector_fund_flow_candidates()
+    if not candidates:
         return None
-    provider_name, sector_df = fetched
-    name_col = find_col(sector_df, ["名称", "行业", "板块"])
-    flow_col = find_col(sector_df, ["主力净流入", "净流入", "资金净流入", "净额"])
-    change_col = find_col(sector_df, ["涨跌幅", "涨幅"])
-    return provider_name, sector_df.copy(), name_col, flow_col, change_col
+    return candidates[0]
+
+
+def _fetch_sector_fund_flow_candidates() -> list[tuple[str, pd.DataFrame, str | None, str | None, str | None]]:
+    fetched_candidates: list[tuple[str, pd.DataFrame, str | None, str | None, str | None]] = []
+    providers = [
+        ("stock_fund_flow_concept", {"symbol": "即时"}, "概念板块资金流"),
+        ("stock_fund_flow_industry", {"symbol": "即时"}, "行业板块资金流"),
+        ("stock_sector_spot", {"indicator": "新浪行业"}, "行业板块资金流"),
+    ]
+    for provider_name, kwargs, label in providers:
+        try:
+            sector_df = _call_ak_provider(provider_name, kwargs)
+        except Exception as e:
+            print(f"[WARN] {label} provider={provider_name} failed: {repr(e)}")
+            continue
+        name_col = find_col(sector_df, ["名称", "行业", "板块"])
+        flow_col = find_col(sector_df, ["主力净流入", "净流入", "资金净流入", "净额"])
+        change_col = find_col(sector_df, ["涨跌幅", "涨幅"])
+        if name_col is None:
+            continue
+        fetched_candidates.append((provider_name, sector_df.copy(), name_col, flow_col, change_col))
+    return fetched_candidates
 
 
 def _rank_sector_fund_flow(
@@ -477,26 +488,38 @@ def _rank_sector_fund_flow(
 
 def _apply_sector_strength(base: pd.DataFrame, cache_dir: str | os.PathLike[str] | None = None) -> pd.DataFrame:
     columns = ["code", "主线板块", "板块强度分"]
-    fetched = _fetch_sector_fund_flow()
+    fetched_candidates = _fetch_sector_fund_flow_candidates()
 
-    if fetched is None:
+    if not fetched_candidates:
         cached = _read_enrichment_cache(cache_dir, "sector_strength", columns)
         return _merge_enrichment_values(base, cached, ["主线板块", "板块强度分"])
 
-    provider_name, sector_df, name_col, flow_col, change_col = fetched
-    if name_col is None:
-        cached = _read_enrichment_cache(cache_dir, "sector_strength", columns)
-        return _merge_enrichment_values(base, cached, ["主线板块", "板块强度分"])
-
-    sector = _rank_sector_fund_flow(sector_df, flow_col=flow_col, change_col=change_col)
-    top_sector_rows = sector.head(10).copy()
-    top_sectors = [str(value) for value in top_sector_rows[name_col].tolist() if str(value).strip()]
-    sector_labels = _extract_sector_labels(top_sector_rows, name_col)
+    selected_sectors: list[tuple[str, str, str | None]] = []
+    seen_sector_names: set[str] = set()
     sina_label_map: dict[str, str] | None = None
+    for provider_name, sector_df, name_col, flow_col, change_col in fetched_candidates:
+        sector = _rank_sector_fund_flow(sector_df, flow_col=flow_col, change_col=change_col)
+        top_sector_rows = sector.head(10).copy()
+        sector_labels = _extract_sector_labels(top_sector_rows, name_col)
+        for sector_name in [str(value) for value in top_sector_rows[name_col].tolist() if str(value).strip()]:
+            if provider_name == "stock_fund_flow_concept" and _is_generic_concept_bucket(sector_name):
+                continue
+            normalized_name = _normalize_sector_name(sector_name)
+            if not normalized_name or normalized_name in seen_sector_names:
+                continue
+            selected_sectors.append((provider_name, sector_name, sector_labels.get(sector_name)))
+            seen_sector_names.add(normalized_name)
+            if len(selected_sectors) >= 10:
+                break
+        if len(selected_sectors) >= 10:
+            break
+
+    if not selected_sectors:
+        cached = _read_enrichment_cache(cache_dir, "sector_strength", columns)
+        return _merge_enrichment_values(base, cached, ["主线板块", "板块强度分"])
 
     mappings: list[pd.DataFrame] = []
-    for index, sector_name in enumerate(top_sectors):
-        sector_label = sector_labels.get(sector_name)
+    for index, (provider_name, sector_name, sector_label) in enumerate(selected_sectors):
         if sector_label is None:
             if sina_label_map is None:
                 sina_label_map = _fetch_sina_sector_label_map()
@@ -514,7 +537,8 @@ def _apply_sector_strength(base: pd.DataFrame, cache_dir: str | os.PathLike[str]
             mappings.append(mapping[["code", "主线板块", "板块强度分"]])
 
     if not mappings:
-        print(f"[WARN] 行业板块 provider={provider_name} 未匹配到候选股")
+        provider_names = ",".join(provider_name for provider_name, _, _ in selected_sectors)
+        print(f"[WARN] 行业板块 provider={provider_names} 未匹配到候选股")
         cached = _read_enrichment_cache(cache_dir, "sector_strength", columns)
         return _merge_enrichment_values(base, cached, ["主线板块", "板块强度分"])
 
@@ -558,6 +582,18 @@ def _extract_sector_labels(sector_df: pd.DataFrame, name_col: str) -> dict[str, 
         if name and label:
             labels[name] = label
     return labels
+
+
+def _is_generic_concept_bucket(sector_name: str) -> bool:
+    normalized_name = _normalize_sector_name(sector_name)
+    return normalized_name in {
+        "深股通",
+        "沪股通",
+        "陆股通",
+        "融资融券",
+        "国企改革",
+        "一带一路",
+    }
 
 
 def _fetch_sina_sector_label_map() -> dict[str, str]:
@@ -609,9 +645,20 @@ def _fetch_sector_constituents(sector_name: str, sector_label: str | None = None
             cons_df = ak.stock_sector_detail(sector=sector_label)
         except Exception as e:
             print(f"[WARN] 新浪板块成分获取失败：{sector_name}/{sector_label} {repr(e)}")
-            return None
+            cons_df = None
         if cons_df is not None and not cons_df.empty:
             print(f"[ENRICH] 新浪板块成分 provider=stock_sector_detail sector={sector_name} label={sector_label} rows={len(cons_df)}")
+            return cons_df
+    for provider_name in ["stock_board_concept_cons_em", "stock_board_industry_cons_em"]:
+        if not hasattr(ak, provider_name):
+            continue
+        try:
+            cons_df = getattr(ak, provider_name)(symbol=sector_name)
+        except Exception as e:
+            print(f"[WARN] 东方财富板块成分获取失败：provider={provider_name} sector={sector_name} {repr(e)}")
+            continue
+        if cons_df is not None and not cons_df.empty:
+            print(f"[ENRICH] 东方财富板块成分 provider={provider_name} sector={sector_name} rows={len(cons_df)}")
             return cons_df
     cons_df = _fetch_classified_constituents(sector_name)
     if cons_df is not None and not cons_df.empty:

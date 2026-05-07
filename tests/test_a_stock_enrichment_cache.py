@@ -364,3 +364,107 @@ def test_sector_strength_uses_classify_mapping_when_sector_detail_is_missing(mon
 
     assert enrichment.loc[0, "主线板块"] == "软件开发"
     assert enrichment.loc[0, "板块强度分"] == 25
+
+
+def test_sector_strength_prioritizes_concept_flow_before_industry(monkeypatch, tmp_path) -> None:
+    quote_df = pd.DataFrame(
+        [
+            {"code": "000001", "名称": "半导体一号"},
+            {"code": "000002", "名称": "算力芯片"},
+            {"code": "000003", "名称": "电力龙头"},
+        ]
+    )
+
+    monkeypatch.setattr(
+        a_stock.ak,
+        "stock_fund_flow_industry",
+        lambda symbol="即时": pd.DataFrame([{"行业": "电力", "净额": "20亿"}]),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        a_stock.ak,
+        "stock_fund_flow_concept",
+        lambda symbol="即时": pd.DataFrame(
+            [
+                {"行业": "半导体", "净额": "80亿"},
+                {"行业": "国产算力芯片", "净额": "60亿"},
+            ]
+        ),
+        raising=False,
+    )
+
+    def fake_constituents(sector_name: str, sector_label: str | None = None) -> pd.DataFrame | None:
+        mapping = {
+            "半导体": pd.DataFrame([{"代码": "000001"}]),
+            "国产算力芯片": pd.DataFrame([{"代码": "000002"}]),
+            "电力": pd.DataFrame([{"代码": "000003"}]),
+        }
+        return mapping.get(sector_name)
+
+    monkeypatch.setattr(a_stock, "_fetch_sector_constituents", fake_constituents)
+
+    enrichment = a_stock.build_mainline_enrichment(quote_df, cache_dir=tmp_path)
+
+    assert enrichment.loc[enrichment["code"] == "000001", "主线板块"].iloc[0] == "半导体"
+    assert enrichment.loc[enrichment["code"] == "000002", "主线板块"].iloc[0] == "国产算力芯片"
+
+
+def test_sector_strength_uses_eastmoney_concept_constituents_as_secondary_fallback(monkeypatch, tmp_path) -> None:
+    quote_df = pd.DataFrame([{"code": "000001", "名称": "半导体一号"}])
+
+    monkeypatch.setattr(
+        a_stock.ak,
+        "stock_fund_flow_concept",
+        lambda symbol="即时": pd.DataFrame([{"行业": "半导体", "净额": "80亿"}]),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        a_stock.ak,
+        "stock_sector_spot",
+        lambda indicator="新浪行业": pd.DataFrame(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        a_stock.ak,
+        "stock_sector_detail",
+        lambda sector: pd.DataFrame(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        a_stock.ak,
+        "stock_board_concept_cons_em",
+        lambda symbol: pd.DataFrame([{"代码": "000001"}]) if symbol == "半导体" else pd.DataFrame(),
+        raising=False,
+    )
+
+    enrichment = a_stock.build_mainline_enrichment(quote_df, cache_dir=tmp_path)
+
+    assert enrichment.loc[0, "主线板块"] == "半导体"
+    assert enrichment.loc[0, "板块强度分"] == 25
+
+
+def test_sector_strength_skips_generic_capital_flow_concepts(monkeypatch, tmp_path) -> None:
+    quote_df = pd.DataFrame([{"code": "000001", "名称": "半导体一号"}])
+
+    monkeypatch.setattr(
+        a_stock.ak,
+        "stock_fund_flow_concept",
+        lambda symbol="即时": pd.DataFrame(
+            [
+                {"行业": "融资融券", "净额": "120亿"},
+                {"行业": "半导体", "净额": "80亿"},
+            ]
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        a_stock.ak,
+        "stock_board_concept_cons_em",
+        lambda symbol: pd.DataFrame([{"代码": "000001"}]) if symbol == "半导体" else pd.DataFrame(),
+        raising=False,
+    )
+    monkeypatch.setattr(a_stock.ak, "stock_sector_detail", lambda sector: pd.DataFrame(), raising=False)
+
+    enrichment = a_stock.build_mainline_enrichment(quote_df, cache_dir=tmp_path)
+
+    assert enrichment.loc[0, "主线板块"] == "半导体"
