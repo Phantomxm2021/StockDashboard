@@ -5,6 +5,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from dashboard_server import create_app
+from stock_dashboard import auth
 
 
 def make_client(tmp_path: Path) -> TestClient:
@@ -134,3 +135,28 @@ def test_root_job_run_returns_job_id_and_status_endpoint(tmp_path: Path) -> None
     assert status_response.json()["job_id"] == job_id
     assert status_response.json()["mode"] == "cn.after_close"
     assert "logs" in status_response.json()
+
+
+def test_token_stays_valid_for_day_scale_session(monkeypatch) -> None:
+    start = 1_700_000_000
+    monkeypatch.setattr(auth.time, "time", lambda: start)
+
+    token = auth.create_token("root", "secret")
+
+    monkeypatch.setattr(auth.time, "time", lambda: start + 60 * 60 * 24)
+
+    payload = auth.parse_token(token, "secret")
+
+    assert payload is not None
+    assert payload.username == "root"
+
+
+def test_token_expires_after_ttl_window(monkeypatch) -> None:
+    start = 1_700_000_000
+    monkeypatch.setattr(auth.time, "time", lambda: start)
+
+    token = auth.create_token("root", "secret")
+
+    monkeypatch.setattr(auth.time, "time", lambda: start + auth.TOKEN_TTL_SECONDS + 1)
+
+    assert auth.parse_token(token, "secret") is None

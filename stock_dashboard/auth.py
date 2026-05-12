@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 HASH_NAME = "sha256"
 HASH_ITERATIONS = 240_000
-TOKEN_TTL_SECONDS = 60 * 60 * 12
+TOKEN_TTL_SECONDS = 60 * 60 * 24 * 30
 
 
 @dataclass(frozen=True)
