@@ -56,13 +56,7 @@ React + FastAPI 的多市场观察看板。系统支持 A 股、港股和美股�
 docker compose up --build -d
 ```
 
-`web` 容器启动时会先检查 `reports/<market>/latest_*.csv`。默认 `STOCK_BOOTSTRAP_REPORTS=missing`，只补齐缺失的数据；如果希望每次重新部署都强制重新抓取一轮，设置：
-
-```bash
-STOCK_BOOTSTRAP_REPORTS=always docker compose up --build -d
-```
-
-单个市场或单个报告抓取失败不会阻塞网站启动，失败原因会写入 `web` 容器日志。
+容器启动不会自动抓取数据。数据更新只通过手动触发任务或 scheduler 定时任务执行。
 
 ### 中国大陆 / 阿里云构建优化
 
@@ -184,8 +178,6 @@ Docker Compose 使用命名卷保存运行数据：
 - `/app/reports`：看板读取的 latest 报告。
 - `/app/output`：任务输出的 CSV/HTML。
 - `/app/logs`：任务日志目录。
-
-启动抓取策略由 `STOCK_BOOTSTRAP_REPORTS` 控制：
 
 - `missing`：默认值，只在 latest 报告缺失时抓取。
 - `always`：每次容器启动都强制抓取一轮。
