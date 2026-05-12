@@ -25,7 +25,7 @@ React + FastAPI 的多市场观察看板。系统支持 A 股、港股和美股�
 
 页面通过左侧市场下拉框切换市场。策略说明不显示在看板页面中，任务结果按市场独立保存到 `reports/<market>/`。
 
-美股盘前/盘后观察使用 AKShare 做候选池初筛，再用 Alpaca Basic 的 IEX snapshot 修正扩展时段价格。需要配置 `ALPACA_API_KEY_ID` 和 `ALPACA_API_SECRET_KEY`；未配置时任务会失败并提示，不会退回到 AKShare 生成重复的伪扩展时段报告。
+美股盘前/盘后观察统一使用 AKShare 行情，不再依赖 Alpaca。
 
 ## 策略摘要
 
@@ -53,8 +53,6 @@ React + FastAPI 的多市场观察看板。系统支持 A 股、港股和美股�
 启动：
 
 ```bash
-export ALPACA_API_KEY_ID=你的_Alpaca_Key_ID
-export ALPACA_API_SECRET_KEY=你的_Alpaca_Secret_Key
 docker compose up --build -d
 ```
 
@@ -242,8 +240,6 @@ cd ..
 启动后端：
 
 ```bash
-export ALPACA_API_KEY_ID=你的_Alpaca_Key_ID
-export ALPACA_API_SECRET_KEY=你的_Alpaca_Secret_Key
 PYTHONPATH=. python -m uvicorn dashboard_server:app --host 127.0.0.1 --port 8001
 ```
 

@@ -115,83 +115,28 @@ def test_pre_market_output_populates_core_pool(tmp_path):
     assert payload["rows"][0]["早盘买入等级"] == "早盘重点确认"
 
 
-def test_us_extended_report_requires_alpaca_keys_without_test_source(monkeypatch, tmp_path):
-    monkeypatch.delenv("ALPACA_API_KEY_ID", raising=False)
-    monkeypatch.delenv("ALPACA_API_SECRET_KEY", raising=False)
-
-    try:
-        run_us_report(
-            "pre_market",
-            tmp_path,
-            now=datetime(2026, 5, 5, 9, 0, tzinfo=ZoneInfo("America/New_York")),
-        )
-    except RuntimeError as exc:
-        assert "ALPACA_API_KEY_ID" in str(exc)
-    else:
-        raise AssertionError("expected Alpaca API key requirement")
-
-
-def test_us_extended_report_uses_alpaca_snapshot_after_akshare_screen(monkeypatch, tmp_path):
-    monkeypatch.setenv("ALPACA_API_KEY_ID", "key-id")
-    monkeypatch.setenv("ALPACA_API_SECRET_KEY", "secret-key")
-
+def test_us_extended_report_uses_akshare_only(tmp_path):
     class FakeAk:
         def stock_us_spot_em(self):
             return pd.DataFrame(
                 [
-                    {"symbol": "105.NVDA", "name": "NVIDIA", "price": 145.0, "change_pct": 2.0, "amount": 20_000_000_000},
-                    {"symbol": "105.MSFT", "name": "Microsoft", "price": 430.0, "change_pct": 1.5, "amount": 12_000_000_000},
-                    {"symbol": "105.PENNY", "name": "Penny Corp", "price": 1.2, "change_pct": 20.0, "amount": 500_000_000},
+                    {"symbol": "NVDA", "name": "NVIDIA", "price": 151.0, "change_pct": 4.14, "amount": 30_200_000_000},
+                    {"symbol": "MSFT", "name": "Microsoft", "price": 421.0, "change_pct": -2.09, "amount": 11_000_000_000},
+                    {"symbol": "PENNY", "name": "Penny Corp", "price": 1.2, "change_pct": 20.0, "amount": 500_000_000},
                 ]
             )
-
-    class FakeResponse:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {
-                "snapshots": {
-                    "NVDA": {
-                        "latestTrade": {"p": 151.0},
-                        "dailyBar": {"v": 2_000_000},
-                        "prevDailyBar": {"c": 145.0},
-                    },
-                    "MSFT": {
-                        "latestTrade": {"p": 421.0},
-                        "dailyBar": {"v": 1_000_000},
-                        "prevDailyBar": {"c": 430.0},
-                    },
-                }
-            }
-
-    class FakeClient:
-        def __init__(self):
-            self.calls = []
-
-        def get(self, url, **kwargs):
-            self.calls.append((url, kwargs))
-            return FakeResponse()
-
-    client = FakeClient()
 
     csv_path, _ = run_us_report(
         "pre_market",
         tmp_path,
         ak_module=FakeAk(),
         now=datetime(2026, 5, 5, 9, 0, tzinfo=ZoneInfo("America/New_York")),
-        snapshot_client=client,
     )
 
     rows = pd.read_csv(csv_path)
     assert rows["代码"].tolist() == ["NVDA"]
     assert rows.iloc[0]["涨跌幅"] == 4.14
-    assert rows.iloc[0]["成交额亿"] == 3.02
-    assert client.calls[0][0].endswith("/v2/stocks/snapshots")
-    assert client.calls[0][1]["headers"]["APCA-API-KEY-ID"] == "key-id"
-    assert client.calls[0][1]["headers"]["APCA-API-SECRET-KEY"] == "secret-key"
-    assert client.calls[0][1]["params"]["feed"] == "iex"
-    assert client.calls[0][1]["params"]["symbols"] == "NVDA,MSFT"
+    assert rows.iloc[0]["成交额亿"] == 302.0
 
 
 def test_hk_fallback_maps_chinese_name_column(tmp_path):

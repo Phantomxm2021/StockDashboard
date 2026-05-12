@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from datetime import datetime, time
 from pathlib import Path
 from typing import Any
@@ -10,9 +9,6 @@ import pandas as pd
 
 US_EASTERN_TZ = ZoneInfo("America/New_York")
 HK_TZ = ZoneInfo("Asia/Hong_Kong")
-ALPACA_BASE_URL = "https://data.alpaca.markets"
-US_EXTENDED_REPORT_TYPES = {"pre_market", "after_hours"}
-US_ALPACA_CANDIDATE_LIMIT = 200
 
 
 OUTPUT_COLUMNS = [
@@ -84,14 +80,10 @@ def run_us_report(
     ak_module: Any | None = None,
     now: datetime | None = None,
     enforce_session: bool = False,
-    snapshot_client: Any | None = None,
 ) -> tuple[Path, Path]:
     if enforce_session:
         _ensure_us_extended_session(report_type, now or datetime.now(US_EASTERN_TZ))
-    if report_type in US_EXTENDED_REPORT_TYPES and (ak_module is None or snapshot_client is not None):
-        quotes = _fetch_alpaca_us_extended_quotes(ak_module=ak_module, snapshot_client=snapshot_client)
-    else:
-        quotes = _fetch_us_quotes(_load_akshare(ak_module))
+    quotes = _fetch_us_quotes(_load_akshare(ak_module))
     candidates = build_us_candidates_from_quotes(quotes, report_type=report_type)
     return _write_market_outputs(candidates, output_dir, f"us_{report_type}")
 
@@ -262,169 +254,6 @@ def _fetch_us_quotes(ak: Any) -> pd.DataFrame:
     if last_error is not None:
         raise RuntimeError(f"AKShare 美股实时行情接口调用失败：{last_error}") from last_error
     raise RuntimeError("AKShare 缺少美股实时行情接口")
-
-
-def _fetch_alpaca_us_extended_quotes(
-    ak_module: Any | None = None,
-    snapshot_client: Any | None = None,
-) -> pd.DataFrame:
-    api_key_id = os.getenv("ALPACA_API_KEY_ID")
-    api_secret_key = os.getenv("ALPACA_API_SECRET_KEY")
-    if not api_key_id or not api_secret_key:
-        raise RuntimeError(
-            "美股盘前/盘后观察需要配置 ALPACA_API_KEY_ID 和 ALPACA_API_SECRET_KEY，"
-            "否则无法区分扩展时段行情。"
-        )
-
-    if snapshot_client is None:
-        import httpx
-
-        snapshot_client = httpx
-
-    base_quotes = _fetch_us_quotes(_load_akshare(ak_module))
-    universe = _build_us_alpaca_universe(base_quotes)
-    if universe.empty:
-        raise RuntimeError("AKShare 美股初筛后没有可供 Alpaca 修正的候选。")
-
-    snapshots = _fetch_alpaca_snapshots(
-        universe["alpaca_symbol"].tolist(),
-        snapshot_client=snapshot_client,
-        api_key_id=api_key_id,
-        api_secret_key=api_secret_key,
-    )
-
-    rows: list[dict[str, Any]] = []
-    for item in universe.to_dict("records"):
-        snapshot = snapshots.get(str(item["alpaca_symbol"]))
-        if not isinstance(snapshot, dict):
-            continue
-        quote = _alpaca_snapshot_to_quote(item, snapshot)
-        if quote is not None:
-            rows.append(quote)
-
-    if not rows:
-        raise RuntimeError("Alpaca IEX 没有返回可用的美股扩展时段候选行情。")
-    return pd.DataFrame(rows)
-
-
-def _build_us_alpaca_universe(quotes: pd.DataFrame) -> pd.DataFrame:
-    df = _normalize_quote_frame(quotes, market_label="美股")
-    df["alpaca_symbol"] = df["code"].map(_to_alpaca_symbol)
-    df = df[
-        (df["alpaca_symbol"] != "")
-        & (df["最新价"] >= 5)
-        & (df["成交额"] >= 100_000_000)
-        & (df["涨跌幅"] >= 1.0)
-    ].copy()
-    df = df.sort_values("成交额", ascending=False).drop_duplicates("alpaca_symbol")
-    return df.head(US_ALPACA_CANDIDATE_LIMIT)
-
-
-def _to_alpaca_symbol(code: Any) -> str:
-    raw = str(code or "").strip().upper()
-    if "." in raw:
-        raw = raw.rsplit(".", 1)[-1]
-    return raw.replace("-", ".")
-
-
-def _fetch_alpaca_snapshots(
-    symbols: list[str],
-    snapshot_client: Any,
-    api_key_id: str,
-    api_secret_key: str,
-) -> dict[str, Any]:
-    snapshots: dict[str, Any] = {}
-    base_url = os.getenv("ALPACA_API_BASE_URL", ALPACA_BASE_URL).rstrip("/")
-    url = f"{base_url}/v2/stocks/snapshots"
-    for batch_start in range(0, len(symbols), 100):
-        batch = symbols[batch_start : batch_start + 100]
-        response = _alpaca_get(
-            snapshot_client,
-            url,
-            params={"symbols": ",".join(batch), "feed": "iex"},
-            api_key_id=api_key_id,
-            api_secret_key=api_secret_key,
-        )
-        payload = response.json()
-        batch_snapshots = payload.get("snapshots") if isinstance(payload, dict) else None
-        if isinstance(batch_snapshots, dict):
-            snapshots.update(batch_snapshots)
-            continue
-        for symbol in batch:
-            if isinstance(payload, dict) and isinstance(payload.get(symbol), dict):
-                snapshots[symbol] = payload[symbol]
-    return snapshots
-
-
-def _alpaca_get(
-    snapshot_client: Any,
-    url: str,
-    params: dict[str, str],
-    api_key_id: str,
-    api_secret_key: str,
-) -> Any:
-    response = snapshot_client.get(
-        url,
-        params=params,
-        timeout=30,
-        headers={
-            "Accept": "application/json",
-            "APCA-API-KEY-ID": api_key_id,
-            "APCA-API-SECRET-KEY": api_secret_key,
-            "User-Agent": "stock-dashboard/1.0",
-        },
-    )
-    try:
-        response.raise_for_status()
-    except Exception as exc:
-        status_code = getattr(getattr(exc, "response", None), "status_code", None)
-        if status_code in {401, 403}:
-            raise RuntimeError(
-                "Alpaca 美股 IEX snapshot 授权失败，请检查 ALPACA_API_KEY_ID 和 "
-                "ALPACA_API_SECRET_KEY 是否有效。"
-            ) from exc
-        raise RuntimeError(f"Alpaca 美股 IEX snapshot 请求失败：HTTP {status_code or 'unknown'}") from exc
-    return response
-
-
-def _alpaca_snapshot_to_quote(base_item: dict[str, Any], snapshot: dict[str, Any]) -> dict[str, Any] | None:
-    ticker = str(base_item.get("alpaca_symbol") or "").strip()
-    latest_trade = snapshot.get("latestTrade") if isinstance(snapshot.get("latestTrade"), dict) else {}
-    minute_bar = snapshot.get("minuteBar") if isinstance(snapshot.get("minuteBar"), dict) else {}
-    daily_bar = snapshot.get("dailyBar") if isinstance(snapshot.get("dailyBar"), dict) else {}
-    prev_daily_bar = snapshot.get("prevDailyBar") if isinstance(snapshot.get("prevDailyBar"), dict) else {}
-
-    price = _first_number(latest_trade.get("p"), minute_bar.get("c"), daily_bar.get("c"))
-    previous_close = _first_number(prev_daily_bar.get("c"))
-    change_pct = None
-    if price is not None and previous_close not in {None, 0}:
-        change_pct = (price - previous_close) / previous_close * 100
-    else:
-        change_pct = _first_number(base_item.get("涨跌幅"))
-
-    volume = _first_number(daily_bar.get("v"), minute_bar.get("v"), 0) or 0
-    amount = None
-    if amount is None and price is not None:
-        amount = price * volume
-
-    return {
-        "code": ticker,
-        "名称": str(base_item.get("名称") or ticker),
-        "最新价": price or 0,
-        "涨跌幅": round(change_pct or 0, 2),
-        "成交额": amount or 0,
-    }
-
-
-def _first_number(*values: Any) -> float | None:
-    for value in values:
-        try:
-            if value is None or value == "":
-                continue
-            return float(value)
-        except (TypeError, ValueError):
-            continue
-    return None
 
 
 def _write_market_outputs(

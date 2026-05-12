@@ -1007,11 +1007,13 @@ def morning_confirm(
     if "code" not in yesterday_df.columns:
         raise RuntimeError("昨日候选池 CSV 缺少 code 字段")
 
-    # 优先读取昨日 A 池；如果没有 A 池，就退回读取全部候选
+    # 早盘确认默认读取昨日核心关注 + 继续观察；如果两者都没有，再退回全部候选
     if "买入观察等级" in yesterday_df.columns:
-        a_df = yesterday_df[yesterday_df["买入观察等级"].astype(str).str.startswith("A_")].copy()
-        if len(a_df) > 0:
-            yesterday_df = a_df
+        focus_df = yesterday_df[
+            yesterday_df["买入观察等级"].astype(str).str.startswith(("A_", "B_"))
+        ].copy()
+        if len(focus_df) > 0:
+            yesterday_df = focus_df
 
     yesterday_codes = set(yesterday_df["code"].astype(str).apply(normalize_code))
 

@@ -52,3 +52,29 @@ def test_classify_morning_buy_level_keeps_weak_to_strong_in_watch_pool() -> None
 
     assert a_stock.classify_morning_buy_level(row) == "B_继续观察"
 
+
+def test_morning_confirm_includes_core_and_watch_pools(monkeypatch, tmp_path) -> None:
+    yesterday_path = tmp_path / "latest_after_close.csv"
+    pd.DataFrame(
+        [
+            {"code": "000001", "代码": "000001", "名称": "核心票", "买入观察等级": "A_核心关注"},
+            {"code": "000002", "代码": "000002", "名称": "观察票", "买入观察等级": "B_继续观察"},
+            {"code": "000003", "代码": "000003", "名称": "放弃票", "买入观察等级": "C_暂缓跟踪"},
+        ]
+    ).to_csv(yesterday_path, index=False)
+
+    monkeypatch.setattr(
+        a_stock,
+        "get_realtime_quotes",
+        lambda: pd.DataFrame(
+            [
+                {"code": "000001", "代码": "000001", "名称": "核心票", "最新价": 10.5, "涨跌幅": 2.2, "成交额": 300_000_000, "换手率": 6.0, "有换手率数据": True, "数据源": "test"},
+                {"code": "000002", "代码": "000002", "名称": "观察票", "最新价": 8.8, "涨跌幅": 1.1, "成交额": 180_000_000, "换手率": 4.2, "有换手率数据": True, "数据源": "test"},
+                {"code": "000003", "代码": "000003", "名称": "放弃票", "最新价": 5.1, "涨跌幅": 1.8, "成交额": 220_000_000, "换手率": 5.0, "有换手率数据": True, "数据源": "test"},
+            ]
+        ),
+    )
+
+    confirm_df, _ = a_stock.morning_confirm(str(yesterday_path), a_stock.StrategyConfig())
+
+    assert set(confirm_df["代码"]) == {"000001", "000002"}
