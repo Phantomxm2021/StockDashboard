@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { clearToken, fetchMe, getStoredToken, storeToken, type User } from "./api";
+import { ApiError, clearToken, fetchMe, getStoredToken, getStoredUser, storeToken, storeUser, type User } from "./api";
 import { Dashboard } from "./Dashboard";
 import { LoginPage } from "./LoginPage";
 
@@ -13,15 +13,28 @@ export function App() {
 
   useEffect(() => {
     const token = getStoredToken();
+    const storedUser = getStoredUser();
     if (!token) {
       setAuth({ status: "anonymous", token: null, user: null });
       return;
     }
+    if (storedUser) {
+      setAuth({ status: "authenticated", token, user: storedUser });
+    }
     fetchMe(token)
-      .then((user) => setAuth({ status: "authenticated", token, user }))
-      .catch(() => {
-        clearToken();
-        setAuth({ status: "anonymous", token: null, user: null });
+      .then((user) => {
+        storeUser(user);
+        setAuth({ status: "authenticated", token, user });
+      })
+      .catch((error: unknown) => {
+        if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
+          clearToken();
+          setAuth({ status: "anonymous", token: null, user: null });
+          return;
+        }
+        if (!storedUser) {
+          setAuth({ status: "anonymous", token: null, user: null });
+        }
       });
   }, []);
 
@@ -34,6 +47,7 @@ export function App() {
       <LoginPage
         onAuthenticated={(token, user) => {
           storeToken(token);
+          storeUser(user);
           setAuth({ status: "authenticated", token, user });
         }}
       />

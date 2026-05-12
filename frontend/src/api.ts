@@ -57,17 +57,46 @@ export type JobPayload = {
 };
 
 const TOKEN_KEY = "stock_dashboard_token";
+const USER_KEY = "stock_dashboard_user";
+
+export class ApiError extends Error {
+  status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.status = status;
+  }
+}
 
 export function getStoredToken(): string | null {
   return window.localStorage.getItem(TOKEN_KEY);
+}
+
+export function getStoredUser(): User | null {
+  const raw = window.localStorage.getItem(USER_KEY);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as User;
+    if (typeof parsed.username === "string" && typeof parsed.is_root === "boolean") {
+      return parsed;
+    }
+  } catch {
+    return null;
+  }
+  return null;
 }
 
 export function storeToken(token: string): void {
   window.localStorage.setItem(TOKEN_KEY, token);
 }
 
+export function storeUser(user: User): void {
+  window.localStorage.setItem(USER_KEY, JSON.stringify(user));
+}
+
 export function clearToken(): void {
   window.localStorage.removeItem(TOKEN_KEY);
+  window.localStorage.removeItem(USER_KEY);
 }
 
 export async function login(username: string, password: string): Promise<{ token: string; user: User }> {
@@ -154,7 +183,7 @@ async function readJson(response: Response): Promise<Record<string, unknown> | u
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     const detail = typeof data === "object" && data !== null && "detail" in data ? String(data.detail) : "请求失败";
-    throw new Error(detail);
+    throw new ApiError(detail, response.status);
   }
   return data as Record<string, unknown> | unknown[];
 }
